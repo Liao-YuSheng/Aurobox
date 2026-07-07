@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aurobox"
+version = "0.1.0"
+description = "Aurobox Flashbot controller package for PUDU robot API"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.31.0",
+    "python-dotenv>=1.0.0"
+]
+
+[project.scripts]
+aurobox = "aurobox.cli:main"
