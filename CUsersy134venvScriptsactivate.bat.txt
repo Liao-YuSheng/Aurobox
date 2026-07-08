@@ -1,0 +1,2 @@
+C:\Users\y134\venv\Scripts\activate.bat
+cd /d D:\SynologyDrive\桌面\line-backend

@@ -4,7 +4,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Column, String, DateTime
+from sqlalchemy import Column, String, DateTime, Boolean
 from sqlalchemy.dialects.postgresql import UUID
 
 from app.db import Base
@@ -33,3 +33,4 @@ class LineBinding(Base):
     name = Column(String(100), nullable=False)
     bound_at = Column(DateTime, default=datetime.utcnow)
     status = Column(String(20), default="active")               # active / inactive
+    solo_notify = Column(Boolean, nullable=False, default=False)   # 是否限本人接收包裹通知
