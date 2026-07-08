@@ -1,5 +1,6 @@
 from .config import require_config, load_config
 from .pudu_client import PuduApiClient
+import time
 
 
 class FlashbotController:
@@ -62,3 +63,36 @@ class FlashbotController:
             filter_category_ids=filter_category_ids,
             priority=priority,
         )
+    
+    def control_doors(self, sn: str | None, door_number: str, operation: bool) -> dict:
+        return self.client.control_doors(sn or self.default_sn, door_number, operation)
+
+    def wait_until_arrived(self, sn: str | None = None, timeout_seconds: int = 300, poll_interval: int = 3) -> bool:
+        """
+        輪詢監控機制：每隔 poll_interval 秒詢問一次，直到機器人抵達定點 (ARRIVE)。
+        """
+        sn = sn or self.default_sn
+        start_time = time.time()
+        
+        print(f"[系統] 開始監控機器人 {sn} ...")
+        
+        while time.time() - start_time < timeout_seconds:
+            response = self.get_status(sn)
+            
+            # 確保 API 回傳成功才解析狀態
+            if response.get("message") == "SUCCESS":
+                data = response.get("data", {})
+                move_state = data.get("move_state")
+                
+                # 你可以把這行註解掉，這只是開發時用來觀察狀態變化的
+                print(f"[{time.strftime('%H:%M:%S')}] 當前移動狀態: {move_state}")
+                
+                if move_state == "ARRIVE":
+                    print("[系統] 🎯 機器人已成功抵達定點！")
+                    return True
+            
+            # 暫停 poll_interval 秒後再問一次 (避免塞爆 Pudu 伺服器)
+            time.sleep(poll_interval)
+            
+        print("[系統] ⚠️ 輪詢超時，機器人可能卡在路上了！")
+        return False

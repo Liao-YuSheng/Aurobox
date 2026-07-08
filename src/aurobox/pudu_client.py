@@ -182,3 +182,19 @@ class PuduApiClient:
             "/pudu-entry/open-platform-service/v1/door_state",
             {"sn": sn},
         )
+    
+    def control_doors(self, sn: str, door_number: str, operation: bool) -> dict:
+        """
+        控制單一艙門的開關。
+        :param door_number: 艙門編號 (例如 "H_01", "H_02")
+        :param operation: True 打開, False 關閉
+        """
+        payload = {
+            "sn": sn,
+            "door_number": door_number,
+            "operation": operation
+        }
+        return self._post(
+            "/pudu-entry/open-platform-service/v1/control_doors",
+            payload,
+        )
