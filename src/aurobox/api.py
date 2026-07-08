@@ -3,6 +3,7 @@
 from flask import Blueprint, request, jsonify, current_app
 from datetime import datetime, timedelta
 import requests
+import secrets
 from . import db
 from .models import Package, Door, RobotStatus, DeliveryHistory, PackageStatus, DoorStatus, LoadingStatus
 from .robot import FlashbotController
@@ -15,6 +16,16 @@ api_bp = Blueprint('api', __name__)
 def get_controller():
     """Get FlashbotController instance."""
     return FlashbotController(load_config())
+
+
+def _build_pickup_qr_token(package: Package) -> str:
+    """Generate a stable pickup token for QR code display and verification."""
+    if package.pickup_qr_token:
+        return package.pickup_qr_token
+
+    token = secrets.token_urlsafe(24)
+    package.pickup_qr_token = token
+    return token
 
 
 # ============== Package Management APIs ==============
@@ -192,6 +203,9 @@ def package_arrived(package_id):
     package = Package.query.get(package_id)
     if not package:
         return jsonify({'error': 'Package not found'}), 404
+
+    pickup_qr_token = _build_pickup_qr_token(package)
+    qr_display_result = None
     
     package.status = PackageStatus.ARRIVED
     package.arrived_at = datetime.utcnow()
@@ -200,13 +214,39 @@ def package_arrived(package_id):
     history = DeliveryHistory(
         package_id=package_id,
         action='robot_arrived',
-        sn=current_app.config.get('ROBOT_SN')
+        sn=current_app.config.get('ROBOT_SN'),
+        details={'pickup_qr_token_generated': True}
     )
     
     db.session.add(history)
     db.session.commit()
+
+    try:
+        controller = get_controller()
+        qr_display_result = controller.custom_call(
+            sn=current_app.config.get('ROBOT_SN'),
+            shop_id=current_app.config.get('SHOP_ID'),
+            map_name=current_app.config.get('DEFAULT_MAP_NAME', 'map1'),
+            point=package.address,
+            point_type='table',
+            call_device_name='dashboard',
+            call_mode='QR_CODE',
+            mode_data={
+                'qrcode': pickup_qr_token,
+                'text': '請掃描 QR Code 取件',
+            },
+            priority=1,
+        )
+    except Exception as e:
+        qr_display_result = {'error': str(e)}
     
-    return jsonify({'status': 'success', 'arrived_at': package.arrived_at.isoformat()})
+    return jsonify({
+        'status': 'success',
+        'arrived_at': package.arrived_at.isoformat(),
+        'pickup_qr_token': pickup_qr_token,
+        'pickup_qr_text': '請掃描 QR Code 取件',
+        'pickup_qr_display_result': qr_display_result,
+    })
 
 
 @api_bp.route('/packages/<package_id>/cancel', methods=['POST'])
@@ -244,14 +284,21 @@ def package_pickup_complete(package_id):
     package = Package.query.get(package_id)
     if not package:
         return jsonify({'error': 'Package not found'}), 404
+
+    data = request.get_json(silent=True) or {}
+    presented_token = data.get('pickup_qr_token') or request.args.get('pickup_qr_token')
+    if package.pickup_qr_token and presented_token != package.pickup_qr_token:
+        return jsonify({'error': 'Invalid or missing pickup QR token'}), 403
     
     package.status = PackageStatus.COMPLETED
     package.completed_at = datetime.utcnow()
     package.updated_at = datetime.utcnow()
+    package.pickup_qr_token = None
     
     history = DeliveryHistory(
         package_id=package_id,
         action='qrcode_scanned',
+        details={'pickup_qr_token_verified': True}
     )
     
     db.session.add(history)

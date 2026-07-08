@@ -29,7 +29,7 @@ def main(argv=None):
     call_parser.add_argument("--map-name", required=True, help="Map name")
     call_parser.add_argument("--point", required=True, help="Point name")
     call_parser.add_argument("--point-type", default="table", help="Point type")
-    call_parser.add_argument("--call-mode", default="IMG", help="Call mode")
+    call_parser.add_argument("--call-mode", default="CALL", help="Call mode")
     call_parser.add_argument("--priority", type=int, default=1, help="Call priority")
 
     args = parser.parse_args(argv)

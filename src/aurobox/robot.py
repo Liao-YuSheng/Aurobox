@@ -121,7 +121,7 @@ class FlashbotController:
         point: str,
         point_type: str = "table",
         call_device_name: str = "PythonSDK",
-        call_mode: str = "IMG",
+        call_mode: str = "CALL",
         mode_data: dict | None = None,
         do_not_queue: bool = False,
         robot_group_ids: list | None = None,

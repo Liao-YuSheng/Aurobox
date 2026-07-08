@@ -1,283 +1,171 @@
-## 實現完成報告
+# Aurobox 實作完成報告
 
-**實現完成時間**: 2026-07-08
+**完成日期**: 2026-07-08
 **版本**: 0.1.0
-**狀態**: 核心功能完成，可進行端到端測試
----
-### 已完成的功能模塊
+**狀態**: 核心流程已完成，可進行端到端驗證
 
-#### 1. **後端框架 (Flask + SQLAlchemy)** ✓
-- [x] Flask 應用工廠 (`app.py`)
-- [x] SQLAlchemy 數據庫配置
-- [x] 藍圖註冊系統
-- [x] 環境配置管理
+## 1. 專案概述
 
-#### 2. **數據庫模型** (`models.py`) ✓
-實現的模型：
-- [x] **Package**: 包裹配送記錄
-  - 支持所有 8 種狀態 (pending, later, pickup_now, delivering, arrived, completed, returned_cancelled, returned_timeout)
-  - 時間戳記追蹤
-  - 艙門分配
+Aurobox 是一套以普渡 Flashbot 為核心的送貨機器人管理系統，涵蓋包裹派送、艙門控制、機器人狀態監控、LINE webhook、Dashboard 與 CLI 操作。
 
-- [x] **Door**: 艙門狀態
-  - 門的開閉狀態
-  - 載貨狀態 (空置/已鎖定/已裝載)
-  - 包裹追蹤
+## 2. 已完成項目
 
-- [x] **RobotStatus**: 機器人實時狀態
-  - 機器人狀態監控
-  - 電池百分比
-  - 當前位置
-   - 移動狀態
-   - 來源整合欄位：`run_state`、`task_state`、`is_charging`、`charge_stage`
+### 2.1 Flask + SQLAlchemy 基礎架構
 
-- [x] **DeliveryHistory**: 配送歷史記錄
-  - 完整的操作日誌
-  - 時間戳記
-  - 詳細信息 (JSON)
+- [x] Flask 應用工廠與 Blueprint 註冊
+- [x] SQLAlchemy 資料庫初始化
+- [x] SQLite 舊資料表補欄機制
+- [x] 環境變數載入與配置整合
 
-#### 3. **Package 管理 API** (`api.py`) ✓
-實現的端點：
+### 2.2 資料模型
 
-| 方法 | 端點 | 功能 |
-|------|------|------|
-| POST | `/api/packages` | 創建新包裹 |
-| GET | `/api/packages/<id>` | 獲取包裹詳情 |
-| POST | `/api/packages/<id>/response` | 用戶選擇取貨方式 |
-| POST | `/api/packages/<id>/stored` | 管理員放入貨物 |
-| POST | `/api/packages/<id>/departed` | 管理員確認出發 |
-| POST | `/api/packages/<id>/arrived` | 機器人抵達 |
-| POST | `/api/packages/<id>/pickup-complete` | 用戶掃碼驗證 |
-| POST | `/api/packages/<id>/complete` | 用戶完成取貨 |
-| POST | `/api/packages/<id>/cancel` | 取消或超時退回 |
-| POST | `/api/packages/<id>/returned` | 機器人返回 |
+- [x] `Package`
+   - 包裹狀態流程：`pending`、`later`、`pickup_now`、`delivering`、`arrived`、`completed`、`returned_cancelled`、`returned_timeout`
+   - 包含艙門、時間戳記、LINE 使用者 ID、取貨 QR token
+- [x] `Door`
+   - 艙門狀態、裝載狀態、包裹對應資訊
+- [x] `RobotStatus`
+   - `move_state`、`run_state`、`task_state`、`is_charging`、`charge_stage` 等即時欄位
+- [x] `DeliveryHistory`
+   - 完整操作歷史與 JSON details
 
-#### 4. **Dashboard 即時狀態 API** ✓
-端點: `GET /api/dashboard/events`
+### 2.3 包裹管理 API
 
-返回內容：
-- [x] 機器人狀態 (state, battery_level, location, move_state, run_state, task_state, is_charging, charge_stage)
-- [x] 任務隊列統計 (待處理、進行中、稍後、歷史)
-- [x] 艙門狀態列表
-- [x] 當前訂單詳情
+| 方法 | 端點 | 說明 |
+|---|---|---|
+| POST | `/api/packages` | 建立新包裹 |
+| GET | `/api/packages/<id>` | 取得包裹詳情 |
+| POST | `/api/packages/<id>/response` | 住戶選擇 `pickup_now` / `later` |
+| POST | `/api/packages/<id>/stored` | 管理員放貨並指定艙門 |
+| POST | `/api/packages/<id>/departed` | 確認機器人出發 |
+| POST | `/api/packages/<id>/arrived` | 機器人抵達、建立 QR token、嘗試顯示 QR |
+| POST | `/api/packages/<id>/pickup-complete` | 掃碼後完成取貨，驗證 token |
+| POST | `/api/packages/<id>/complete` | 取貨完成後清空艙門 |
+| POST | `/api/packages/<id>/cancel` | 取消或逾時退回 |
+| POST | `/api/packages/<id>/returned` | 記錄機器人返回 |
 
-狀態來源策略：
-- [x] 以 `get_status_summary()` 整合 V1/V2/task-state 三來源
-- [x] 不再用單一 `run_state` 當唯一動作判斷依據
-- [x] 上游 API 失敗時回傳對應 HTTP 錯誤碼（例如 401 / 502），避免一律 500
+### 2.4 Dashboard 即時狀態 API
 
-#### 4.1 **Webhook 對外對接入口** (`webhooks.py`) ✓
-端點: `POST /webhooks/line`
+- 端點：`GET /api/dashboard/events`
+- 回傳：機器人狀態、任務隊列、艙門狀態、今日歷史資料
+- 來源整合：V1 / V2 / task-state 三個 Pudu 狀態來源
+- 上游授權或 HTTP 錯誤會回傳對應狀態碼，不再全部包成 500
 
-實現內容：
-- [x] 作為外部 LINE 平台打入的事件入口
-- [x] 驗證 `X-Line-Signature`，簽章錯誤回傳 `403`
-- [x] 支援 `postback` 事件並回寫包裹狀態（`pickup_now` / `later` / `cancel`）
-- [x] 支援 `message` 事件記錄文字訊息日誌
-- [x] 提供推播通知函式（出發、送達、退回）
+### 2.5 LINE Webhook
 
-#### 5. **管理員服務** (`manager.py`) ✓
-核心功能：
+- 端點：`POST /webhooks/line`
+- 驗證 `X-Line-Signature`
+- 支援 `postback` 與 `message`
+- 可用於包裹狀態回寫與訊息推播
 
-- [x] `register_package()`: 登記新包裹
-- [x] `allocate_door()`: 分配可用艙門
-- [x] `call_robot_to_management()`: 呼叫機器人到管理室
-- [x] `confirm_door_open()`: 打開艙門進行裝載
-- [x] `confirm_package_loaded()`: 確認出發
-- [x] `force_reset_all_doors()`: 防呆檢查 (一鍵開啟所有艙門)
-- [x] `correct_door_state()`: 狀態校正
-- [x] `get_task_queue()`: 獲取任務隊列
+### 2.6 QR Code 取貨流程
 
-#### 6. **後台任務服務** (`tasks.py`) ✓
+- 機器人抵達時建立 `pickup_qr_token`
+- 系統會嘗試呼叫 Pudu `call_mode=QR_CODE` 顯示取貨 QR
+- `pickup-complete` 需帶入相同 token 才會成功
+- 目前沒有另外提供 QR 圖片產生器，前端或 LINE 端可自行將 token 轉成 QR 圖片
 
-- [x] `poll_robot_status()`: 定期輪詢機器人狀態
-- [x] `check_pickup_timeout()`: 檢查超時未取貨的包裹 (默認 10 分鐘)
-- [x] `sync_door_states()`: 同步艙門狀態
-- [x] `handle_robot_returning()`: 機器人返回時的處理
+### 2.7 custom_call 與呼叫模式
 
-#### 7. **配置管理** ✓
-- [x] 環境變量支持
-- [x] PUDU API 配置
-- [x] 數據庫配置
+- `custom_call` 預設 `call_mode` 已調整為 `CALL`
+- 只有 QR 取貨流程才明確使用 `QR_CODE`
+- `IMG` 保留作為圖片展示模式，不作為預設值
 
-#### 8. **CLI 工具** ✓
-現有 CLI 命令：
-- `aurobox status`: 查詢機器人狀態
-- `aurobox position`: 查詢位置
-- `aurobox door-state`: 查詢艙門狀態
-- `aurobox call`: 呼叫機器人
-- 等等 (詳見 `cli.py`)
+### 2.8 管理員服務與背景任務
 
-#### 9. **Web 伺服器啟動** ✓
-- [x] Flask 開發伺服器 (`run.py`)
-- [x] 支持調試模式
-- [x] 自定義主機和端口
+- [x] `register_package()`
+- [x] `allocate_door()`
+- [x] `call_robot_to_management()`
+- [x] `confirm_door_open()`
+- [x] `confirm_package_loaded()`
+- [x] `force_reset_all_doors()`
+- [x] `correct_door_state()`
+- [x] `get_task_queue()`
+- [x] `poll_robot_status()`
+- [x] `check_pickup_timeout()`
+- [x] `sync_door_states()`
+- [x] `handle_robot_returning()`
 
-#### 10. **完整文檔** ✓
-- [x] [README.md](./README.md): 詳細使用指南
-- [x] [examples.py](./examples.py): 使用示例
-- [x] 本實現完成報告
+### 2.9 CLI 與啟動
 
-### 數據流架構
+- [x] `aurobox status`
+- [x] `aurobox position`
+- [x] `aurobox recharge`
+- [x] `aurobox map-list`
+- [x] `aurobox door-state`
+- [x] `aurobox open-map`
+- [x] `aurobox call`
+- [x] Flask 開發伺服器與 debug 模式啟動
 
-```
-┌──────────────────────────────────────────────────────────────┐
-│                       管理員 Dashboard                        │
-└──────────────────────────────────────────────────────────────┘
-          │
-          ▼
-       ┌──────────────────────────────────┐
-       │            API 伺服器            │
-       └──────────────────────────────────┘
-          │
-      ┌─────────────┼─────────────┐
-      ▼             ▼             ▼
-    ┌──────────┐  ┌──────────┐  ┌──────────┐
-    │ Package  │  │  Door    │  │  Robot   │
-    │  Status  │  │  Status  │  │  Status  │
-    └──────────┘  └──────────┘  └──────────┘
-           │
-           ▼
-        ┌────────────────────────────┐
-        │  Pudu Robot API            │
-        │  (Control & Monitoring)    │
-        └────────────────────────────┘
-           │
-           ▼
-        ┌────────────────────────────┐
-        │  Flashbot 送貨機器人       │
-        └────────────────────────────┘
+## 3. 目前資料流
+
+```mermaid
+flowchart TB
+	Dashboard[管理員 Dashboard] --> API[Flask API]
+	LINE[LINE Webhook] --> API
+	API --> Package[Package]
+	API --> Door[Door]
+	API --> Robot[RobotStatus]
+	API --> Manager[ManagerService]
+	API --> Tasks[TaskService]
+	Manager --> Pudu[Pudu Open Platform]
+	Tasks --> Pudu
+	Pudu --> RobotHW[Flashbot 機器人]
 ```
 
-### 配送流程實現
+## 4. 主要流程
 
-完整的 5 步流程實現：
+### 4.1 派送流程
 
-```
-步驟 1: 住戶點選取貨 ──► POST /packages/{id}/response
-  └─ 狀態變更: pending → pickup_now/later
+1. 管理員建立包裹。
+2. 住戶選擇 `pickup_now` 或 `later`。
+3. 管理員放貨並指定艙門。
+4. 機器人前往住戶地址。
+5. 機器人抵達後生成 `pickup_qr_token`，並嘗試以 `QR_CODE` 顯示取貨 QR。
+6. 住戶掃碼後呼叫 `pickup-complete` 完成取貨。
+7. 系統清空艙門並記錄完成歷史。
 
-步驟 2: 機器人抵達管理室 ──► GET /api/dashboard/events
-        ├─ 艙門打開: POST /control_doors (H_01)
-        ├─ 管理員放貨: POST /packages/{id}/stored
-  └─ Dashboard 更新: 已抵達，請放貨
+### 4.2 逾時退回
 
-步驟 3: 管理員確認出發 ──► POST /packages/{id}/departed
-        ├─ 艙門關閉: POST /control_doors (close)
-        ├─ 呼叫機器人: custom_call (to address)
-        ├─ 狀態變更: stored → delivering
-  └─ Dashboard 更新: 機器人已出發
+- 由 `check_pickup_timeout()` 檢查逾時未取貨訂單。
+- 逾時後狀態會轉為 `returned_timeout`，並觸發返航或退回流程。
 
-步驟 4: 機器人抵達住戶 ──► POST /packages/{id}/arrived
-        ├─ 艙門打開 (自動): control_doors (open)
-        ├─ 狀態變更: delivering → arrived
-        └─ 10 分鐘計時開始
+## 5. 重要說明
 
-步驟 5: 住戶取貨完成 ──► POST /packages/{id}/complete
-        ├─ 用戶掃碼: POST /pickup-complete
-        ├─ 艙門關閉 (自動): control_doors (close)
-        ├─ 機器人返回: custom_call (to management)
-        └─ 狀態變更: arrived → completed
-```
+### 5.1 狀態整合
 
-### 超時處理機制
+- `get_status_summary()` 是 Dashboard 與背景任務的主要狀態入口。
+- 不再直接依賴單一 `run_state` 判斷機器人動作。
 
-```
-用戶 10 分鐘內未取貨
-        │
-        ▼
-系統自動觸發 check_pickup_timeout()
-        │
-        ├─ 狀態變更: arrived → returned_timeout
-        ├─ 呼叫機器人返回: custom_call (return)
-        ├─ 艙門關閉: control_doors (close)
-        └─ DeliveryHistory 記錄
-```
+### 5.2 QR 與 webhook
 
-### 防呆機制
+- LINE webhook 是對外事件入口，不是前端輪詢 API。
+- QR 取貨目前採 token 驗證流程，機器人端顯示 QR 屬於 `QR_CODE` 呼叫模式。
 
-管理員可在任何時刻調用：
-```python
-manager_service.force_reset_all_doors()
-```
+### 5.3 custom_call
 
-打開所有艙門進行檢查，確保包裹狀態與系統紀錄一致。
+- 預設模式是 `CALL`。
+- 若需要圖片、影片、QR 顯示，需顯式指定 `call_mode`。
 
-### 環境要求
+## 6. 環境需求
 
-```
-Python >= 3.10
-Flask >= 3.0.0
-SQLAlchemy >= 3.0.0
-requests >= 2.31.0
-python-dotenv >= 1.0.0
-```
+- Python 3.10+
+- Flask 3.0+
+- SQLAlchemy 3.0+
+- requests 2.31+
+- python-dotenv 1.0+
+- cryptography 41+
 
-### 快速啟動
+## 7. 文件與入口
 
-```bash
-# 1. 安裝依賴
-pip install -e .
+- [README.md](./README.md): 使用與 API 說明
+- `run.py`: 應用啟動入口
+- `examples.py`: 範例腳本
 
-# 2. 配置環境變量
-cp .env.example .env
-# 編輯 .env 填入 API 金鑰
+## 8. 後續可延伸項目
 
-# 3. 運行伺服器
-python run.py --debug
+- 前端 QR 圖片直接顯示
+- LINE Flex / LIFF 取貨頁
+- 多機器人支援
+- 異步任務隊列與重試機制
 
-# 4. 測試 API
-curl http://127.0.0.1:5000/api/dashboard/events
-
-# 5. 查看示例
-python examples.py
-```
-
-### 文件結構
-
-```
-src/aurobox/
-├── __init__.py           # 包初始化
-├── app.py                # Flask 應用工廠
-├── config.py             # 配置管理
-├── models.py             # 數據庫模型
-├── pudu_client.py        # Pudu API 客戶端
-├── robot.py              # 機器人控制器
-├── api.py                # API 端點
-├── manager.py            # 管理員服務
-├── tasks.py              # 後台任務
-└── cli.py                # CLI 命令
-
-其他文件：
-├── run.py                # 伺服器啟動
-├── examples.py           # 使用示例
-├── README.md             # 詳細文檔
-└── pyproject.toml        # 項目配置
-```
-
-### 後續優化方向
-
-1. **前端儀表板**
-   - React/Vue Web 應用
-   - 實時 WebSocket 更新
-   - 地圖可視化
-
-2. **多機器人支持**
-   - 機器人選擇和負載均衡
-   - 共享艙門管理
-
-3. **高級功能**
-   - 路線優化
-   - 配送統計報告
-   - 用戶評分系統
-   - 異常告警系統
-
-4. **性能優化**
-   - 異步任務隊列 (Celery)
-   - Redis 緩存
-   - 數據庫查詢優化
-
-5. **可靠性**
-   - 重試機制
-   - 事務處理
-   - 備份和恢復

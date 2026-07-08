@@ -42,6 +42,7 @@ class Package(db.Model):
     door_number = db.Column(db.String(10))  # 分配的艙門號 (H_01, H_02 等)
     status = db.Column(db.String(20), default=PackageStatus.PENDING)
     line_user_id = db.Column(db.String(255))  # LINE 用戶 ID
+    pickup_qr_token = db.Column(db.String(64), unique=True, index=True)  # 掃碼取貨用 QR token
     
     # 時間戳記
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
