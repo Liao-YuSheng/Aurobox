@@ -2,6 +2,7 @@
 
 from flask import Blueprint, request, jsonify, current_app
 from datetime import datetime, timedelta
+import requests
 from . import db
 from .models import Package, Door, RobotStatus, DeliveryHistory, PackageStatus, DoorStatus, LoadingStatus
 from .robot import FlashbotController
@@ -318,8 +319,7 @@ def dashboard_events():
     """
     try:
         controller = get_controller()
-        robot_status = controller.get_status()
-        door_states = controller.get_door_state()
+        status_summary = controller.get_status_summary()
         
         # 更新或創建機器人狀態記錄
         sn = current_app.config.get('ROBOT_SN')
@@ -328,11 +328,14 @@ def dashboard_events():
         if not robot:
             robot = RobotStatus(sn=sn)
         
-        data = robot_status.get('data', {})
-        robot.state = data.get('state', 'idle')
-        robot.battery_level = data.get('battery_level', 0)
-        robot.current_location = data.get('current_location', '')
-        robot.move_state = data.get('move_state', '')
+        robot.state = status_summary.get('state', 'Idle')
+        robot.battery_level = status_summary.get('battery_level', 0)
+        robot.current_location = status_summary.get('current_location', '')
+        robot.move_state = status_summary.get('move_state', '')
+        robot.run_state = status_summary.get('run_state', '')
+        robot.task_state = status_summary.get('task_state', '')
+        robot.is_charging = status_summary.get('is_charging')
+        robot.charge_stage = status_summary.get('charge_stage', '')
         robot.updated_at = datetime.utcnow()
         
         db.session.add(robot)
@@ -359,6 +362,10 @@ def dashboard_events():
                 'battery_level': robot.battery_level,
                 'current_location': robot.current_location,
                 'move_state': robot.move_state,
+                'run_state': robot.run_state,
+                'task_state': robot.task_state,
+                'is_charging': robot.is_charging,
+                'charge_stage': robot.charge_stage,
                 'updated_at': robot.updated_at.isoformat()
             },
             'task_queue': {
@@ -388,6 +395,13 @@ def dashboard_events():
                 'arrived_at': p.arrived_at.isoformat() if p.arrived_at else None
             } for p in delivering_orders]
         })
+
+    except requests.exceptions.HTTPError as e:
+        status_code = e.response.status_code if e.response is not None else 502
+        return jsonify({'error': str(e)}), status_code
+
+    except requests.exceptions.RequestException as e:
+        return jsonify({'error': str(e)}), 502
     
     except Exception as e:
         return jsonify({'error': str(e)}), 500

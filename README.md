@@ -38,6 +38,15 @@ flowchart TB
 - `src/aurobox/models.py`: SQLAlchemy 模型
 - `src/aurobox/cli.py`: CLI 命令列入口
 
+### 狀態整合策略（重要）
+
+- `robot.py` 會同時抓三個來源：
+	- V1：`/v1/status/get_by_sn`
+	- V2：`/v2/status/get_by_sn`
+	- Task：`/v1/robot/task/state/get`
+- 對外統一使用 `get_status_summary()` 的正規化結果，不直接用單一來源欄位判斷。
+- `state` 的判斷優先順序為：`move_state`（移動/抵達）→ `is_charging`（充電）→ `run_state`（錯誤/忙碌）→ 其餘視為 `Idle`。
+
 ## 安裝與啟動
 
 ### 1. 建立虛擬環境
@@ -118,14 +127,21 @@ python run.py --debug
 |---|---|---|
 | GET | `/api/dashboard/events` | 取得即時狀態、任務隊列、艙門與今日歷史紀錄 |
 
+補充：
+
+- `GET /`：本機服務資訊首頁
+- `GET /healthz`：健康檢查
+
 ### 回傳資料重點
 
 `GET /api/dashboard/events` 會回傳：
 
-- `robot_status`: `state`、`battery_level`、`current_location`、`move_state`
+- `robot_status`: `state`、`battery_level`、`current_location`、`move_state`、`run_state`、`task_state`、`is_charging`、`charge_stage`
 - `task_queue`: 待處理、進行中、稍後處理、歷史紀錄數量
 - `door_states`: 每個艙門的狀態與對應包裹
 - `pending_orders`、`delivering_orders`: 目前進行中的訂單清單
+
+備註：當上游 Pudu API 授權失敗時，`/api/dashboard/events` 會回傳對應上游錯誤狀態碼（例如 401），不再一律回傳 500。
 
 ## CLI 指令
 

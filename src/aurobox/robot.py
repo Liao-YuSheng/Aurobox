@@ -16,6 +16,85 @@ class FlashbotController:
     def get_status(self, sn: str | None = None) -> dict:
         return self.client.get_by_sn2(sn or self.default_sn)
 
+    def get_status_v1(self, sn: str | None = None) -> dict:
+        return self.client.get_by_sn1(sn or self.default_sn)
+
+    def get_task_state(self, sn: str | None = None) -> dict:
+        return self.client.get_task_state(sn or self.default_sn)
+
+    def get_status_sources(self, sn: str | None = None) -> dict:
+        """Fetch V1/V2/task-state sources with best-effort fallbacks."""
+        sn = sn or self.default_sn
+
+        sources = {"v1": {}, "v2": {}, "task": {}}
+
+        try:
+            sources["v1"] = self.get_status_v1(sn)
+        except Exception:
+            sources["v1"] = {}
+
+        try:
+            sources["v2"] = self.get_status(sn)
+        except Exception:
+            sources["v2"] = {}
+
+        try:
+            sources["task"] = self.get_task_state(sn)
+        except Exception:
+            sources["task"] = {}
+
+        return sources
+
+    def get_status_summary(self, sn: str | None = None) -> dict:
+        """Build a stable robot status summary from V1/V2/task-state responses."""
+        sources = self.get_status_sources(sn)
+        data_v1 = sources.get("v1", {}).get("data", {}) or {}
+        data_v2 = sources.get("v2", {}).get("data", {}) or {}
+        data_task = sources.get("task", {}).get("data", {}) or {}
+
+        move_state = data_v2.get("move_state") or data_v1.get("move_state") or ""
+        run_state = data_v2.get("run_state") or ""
+        task_state = data_task.get("state") or ""
+        is_charging = data_v2.get("is_charging")
+        if is_charging is None:
+            is_charging = data_v1.get("is_charging")
+        charge_stage = data_v2.get("charge_stage") or data_v1.get("charge_stage") or ""
+        battery_level = data_v2.get("battery_level")
+        if battery_level is None:
+            battery_level = data_v1.get("battery_level", 0)
+
+        current_location = (
+            data_v2.get("current_location")
+            or data_v1.get("current_location")
+            or data_v1.get("position_name")
+            or ""
+        )
+
+        if move_state == "MOVING":
+            state = "Moving"
+        elif is_charging == 1:
+            state = "Charging"
+        elif run_state == "ERROR":
+            state = "Error"
+        elif move_state == "ARRIVE":
+            state = "Arrive"
+        elif run_state == "BUSY":
+            state = "Busy"
+        else:
+            state = "Idle"
+
+        return {
+            "state": state,
+            "move_state": move_state,
+            "run_state": run_state,
+            "task_state": task_state,
+            "is_charging": is_charging,
+            "charge_stage": charge_stage,
+            "battery_level": battery_level,
+            "current_location": current_location,
+            "sources": sources,
+        }
+
     def get_position(self, sn: str | None = None) -> dict:
         return self.client.get_position(sn or self.default_sn)
 
@@ -77,19 +156,16 @@ class FlashbotController:
         print(f"[系統] 開始監控機器人 {sn} ...")
         
         while time.time() - start_time < timeout_seconds:
-            response = self.get_status(sn)
+            response = self.get_status_summary(sn)
             
-            # 確保 API 回傳成功才解析狀態
-            if response.get("message") == "SUCCESS":
-                data = response.get("data", {})
-                move_state = data.get("move_state")
-                
-                # 你可以把這行註解掉，這只是開發時用來觀察狀態變化的
-                print(f"[{time.strftime('%H:%M:%S')}] 當前移動狀態: {move_state}")
-                
-                if move_state == "ARRIVE":
-                    print("[系統] 🎯 機器人已成功抵達定點！")
-                    return True
+            move_state = response.get("move_state", "")
+
+            # 你可以把這行註解掉，這只是開發時用來觀察狀態變化的
+            print(f"[{time.strftime('%H:%M:%S')}] 當前移動狀態: {move_state}")
+
+            if move_state == "ARRIVE":
+                print("[系統] 🎯 機器人已成功抵達定點！")
+                return True
             
             # 暫停 poll_interval 秒後再問一次 (避免塞爆 Pudu 伺服器)
             time.sleep(poll_interval)

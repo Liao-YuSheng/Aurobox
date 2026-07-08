@@ -1,9 +1,35 @@
 """Flask app factory."""
 
 import os
-from flask import Flask
+from flask import Flask, jsonify
+from sqlalchemy import text
 from .models import db
 from .config import load_config
+
+
+def _ensure_robot_status_columns(app: Flask) -> None:
+    """Add newly introduced robot_status columns for existing SQLite DB files."""
+    required_columns = {
+        "run_state": "TEXT",
+        "task_state": "TEXT",
+        "is_charging": "INTEGER",
+        "charge_stage": "TEXT",
+    }
+
+    with app.app_context():
+        table_exists = db.session.execute(
+            text("SELECT name FROM sqlite_master WHERE type='table' AND name='robot_status'")
+        ).fetchone()
+        if not table_exists:
+            return
+
+        rows = db.session.execute(text("PRAGMA table_info(robot_status)")).fetchall()
+        existing = {row[1] for row in rows}
+
+        for column, col_type in required_columns.items():
+            if column not in existing:
+                db.session.execute(text(f"ALTER TABLE robot_status ADD COLUMN {column} {col_type}"))
+        db.session.commit()
 
 
 def create_app(config=None):
@@ -35,6 +61,7 @@ def create_app(config=None):
     # 创建表
     with app.app_context():
         db.create_all()
+        _ensure_robot_status_columns(app)
     
     # 注册蓝图
     from .api import api_bp
@@ -42,5 +69,24 @@ def create_app(config=None):
     
     app.register_blueprint(api_bp, url_prefix='/api')
     app.register_blueprint(webhook_bp, url_prefix='/webhooks')
+
+    @app.get('/')
+    def index():
+        return jsonify({
+            'service': 'aurobox',
+            'status': 'ok',
+            'endpoints': {
+                'healthz': '/healthz',
+                'dashboard_events': '/api/dashboard/events'
+            }
+        })
+
+    @app.get('/healthz')
+    def healthz():
+        return jsonify({'status': 'ok'})
+
+    @app.get('/favicon.ico')
+    def favicon():
+        return '', 204
     
     return app

@@ -68,7 +68,7 @@ class Door(db.Model):
     package_id = db.Column(db.String(36), db.ForeignKey('packages.id'))
     address = db.Column(db.String(255))  # 對應房號
     
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onuptime=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     def __repr__(self):
         return f"<Door {self.door_number} - {self.status} - {self.loading_status}>"
@@ -84,6 +84,10 @@ class RobotStatus(db.Model):
     battery_level = db.Column(db.Float)  # 電池百分比 (0-100)
     current_location = db.Column(db.String(255))  # 當前位置名稱
     move_state = db.Column(db.String(20))  # 移動狀態
+    run_state = db.Column(db.String(20))  # V2 工作狀態
+    task_state = db.Column(db.String(40))  # 任務語意狀態（task/state/get）
+    is_charging = db.Column(db.Integer)  # 1 / -1
+    charge_stage = db.Column(db.String(50))  # 充電階段文字
     
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

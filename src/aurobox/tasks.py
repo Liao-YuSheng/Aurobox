@@ -22,7 +22,7 @@ class TaskService:
         Poll robot status and update DB.
         """
         try:
-            status = self.controller.get_status(sn)
+            status_summary = self.controller.get_status_summary(sn)
             door_state = self.controller.get_door_state(sn)
             
             # 更新機器人狀態
@@ -30,11 +30,14 @@ class TaskService:
             if not robot:
                 robot = RobotStatus(sn=sn)
             
-            data = status.get('data', {})
-            robot.state = data.get('state', 'idle')
-            robot.battery_level = data.get('battery_level', 0)
-            robot.current_location = data.get('current_location', '')
-            robot.move_state = data.get('move_state', '')
+            robot.state = status_summary.get('state', 'Idle')
+            robot.battery_level = status_summary.get('battery_level', 0)
+            robot.current_location = status_summary.get('current_location', '')
+            robot.move_state = status_summary.get('move_state', '')
+            robot.run_state = status_summary.get('run_state', '')
+            robot.task_state = status_summary.get('task_state', '')
+            robot.is_charging = status_summary.get('is_charging')
+            robot.charge_stage = status_summary.get('charge_stage', '')
             robot.updated_at = datetime.utcnow()
             
             db.session.add(robot)

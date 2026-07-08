@@ -1,5 +1,9 @@
 ## 實現完成報告
 
+**實現完成時間**: 2026-07-08
+**版本**: 0.1.0
+**狀態**: 核心功能完成，可進行端到端測試
+---
 ### 已完成的功能模塊
 
 #### 1. **後端框架 (Flask + SQLAlchemy)** ✓
@@ -24,7 +28,8 @@
   - 機器人狀態監控
   - 電池百分比
   - 當前位置
-  - 移動狀態
+   - 移動狀態
+   - 來源整合欄位：`run_state`、`task_state`、`is_charging`、`charge_stage`
 
 - [x] **DeliveryHistory**: 配送歷史記錄
   - 完整的操作日誌
@@ -51,10 +56,15 @@
 端點: `GET /api/dashboard/events`
 
 返回內容：
-- [x] 機器人狀態 (state, battery_level, location)
+- [x] 機器人狀態 (state, battery_level, location, move_state, run_state, task_state, is_charging, charge_stage)
 - [x] 任務隊列統計 (待處理、進行中、稍後、歷史)
 - [x] 艙門狀態列表
 - [x] 當前訂單詳情
+
+狀態來源策略：
+- [x] 以 `get_status_summary()` 整合 V1/V2/task-state 三來源
+- [x] 不再用單一 `run_state` 當唯一動作判斷依據
+- [x] 上游 API 失敗時回傳對應 HTTP 錯誤碼（例如 401 / 502），避免一律 500
 
 #### 5. **管理員服務** (`manager.py`) ✓
 核心功能：
@@ -261,9 +271,3 @@ src/aurobox/
    - 重試機制
    - 事務處理
    - 備份和恢復
-
----
-
-**實現完成時間**: 2026-07-08
-**版本**: 0.1.0
-**狀態**: 核心功能完成，可進行端到端測試

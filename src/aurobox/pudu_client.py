@@ -119,6 +119,18 @@ class PuduApiClient:
             {"sn": sn},
         )
 
+    def get_by_sn1(self, sn: str) -> dict:
+        return self._get(
+            "/pudu-entry/open-platform-service/v1/status/get_by_sn",
+            {"sn": sn},
+        )
+
+    def get_task_state(self, sn: str) -> dict:
+        return self._get(
+            "/pudu-entry/open-platform-service/v1/robot/task/state/get",
+            {"sn": sn},
+        )
+
     def get_position(self, sn: str) -> dict:
         return self._get(
             "/pudu-entry/open-platform-service/v1/robot/get_position",
