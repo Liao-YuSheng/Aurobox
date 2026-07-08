@@ -1,100 +1,85 @@
-# LINE 後端 - 起始專案（階段0）
+# LINE 後端 - 智連櫃社區 AMR 配送系統
 
-對應《LINE模組_實作步驟.md》階段0～階段2的骨架。
+對應整體系統三大部分（管理員Dashboard／LINE／送貨機器人）中的LINE部分。
+
+## 目前完成進度
+
+### 已完成
+- 用戶綁定：住戶在LINE聊天室輸入「門牌 姓名」完成綁定
+- 到貨通知：管理員登記包裹後，推播通知住戶，支援「限本人接收」設定
+- 用戶回覆：住戶按「取貨」／「稍後再取」
+- 管理員確認出發：放貨與派工合併為單一動作
+- 機器人抵達（模擬）：記錄抵達時間，推播提醒＋暫時無法取貨按鈕
+- 住戶取貨（兩階段）：掃碼開門與按下取貨完成分開處理
+- 逾時自動退回：背景排程每分鐘檢查，超過10分鐘自動觸發
+- 機器人返回管理室：僅記錄log，不通知住戶
+- 我的包裹查詢：文字指令查詢「稍後再取」清單
+
+完整狀態機：
+pending → pickup_now → delivering → arrived → completed
+↘ returned_cancelled
+↘ returned_timeout
+
+### 待辦（需要其他模組配合才能繼續）
+- QR Code驗證邏輯（`pickup-complete`目前為TODO，等機器人team提供QR Code格式規格）
+- Dashboard即時通知（SSE）
+- 圖形化Rich Menu（目前用文字指令代替）
+- 一戶多人的完整查詢/操作權限（通知端已支援，查詢端仍有限制）
+
+## 專案結構
+line-backend/
+├── requirements.txt
+└── app/
+├── init.py
+├── config.py         # 讀取環境變數
+├── db.py             # 資料庫連線設定
+├── models.py         # Package、LineBinding 資料表定義
+├── init_db.py        # 建立資料表用的腳本
+├── line_verify.py    # （目前未使用，保留供未來QR Code驗證參考）
+├── line_messaging.py # 封裝呼叫LINE Messaging API的邏輯
+└── main.py           # FastAPI主程式、Webhook端點、所有API路由
 
 ## 快速開始
 
-### 1. 建立虛擬環境
+### 1. 建立虛擬環境並安裝套件
 ```bash
 python -m venv venv
-
-# macOS / Linux
-source venv/bin/activate
-
-# Windows
-venv\Scripts\activate
-```
-
-### 2. 安裝套件
-```bash
+venv\Scripts\activate   # Windows
 pip install -r requirements.txt
 ```
 
-### 3. 設定環境變數
-把 `.env.example` 複製一份改名為 `.env`，填入你在階段0拿到的三組資料：
+### 2. 設定環境變數
 
+建立`.env`檔案（不要commit進版控），需要以下變數：
+LINE_CHANNEL_SECRET=你的Channel Secret
+LINE_CHANNEL_ACCESS_TOKEN=你的Channel Access Token
+LIFF_ID=你的LIFF ID
+LINE_LOGIN_CHANNEL_ID=你的Login Channel ID
+DATABASE_URL=postgresql+psycopg://postgres:你的密碼@localhost:5432/aurobox_line
+APP_ENV=development
+
+### 3. 建立資料表
 ```bash
-cp .env.example .env
+python -m app.init_db
 ```
-
-編輯 `.env`，貼上：
-- `LINE_CHANNEL_SECRET`（Messaging API Channel > Basic settings）
-- `LINE_CHANNEL_ACCESS_TOKEN`（Messaging API Channel > Messaging API 分頁 > Issue）
-- `LIFF_ID`（LINE Login Channel > LIFF 分頁）
-
-`DATABASE_URL` 現在可以先不管，階段1才會用到。
 
 ### 4. 啟動伺服器
 ```bash
 uvicorn app.main:app --reload --port 8000
 ```
 
-打開瀏覽器 http://localhost:8000ㅤ應該看到：
-```json
-{"status": "ok", "message": "LINE backend is running", "env": "development"}
-```
-
-看到這個就代表程式本身沒問題。
-
-### 5. 用 ngrok 讓 LINE 連得到你的本機
-
-LINE 的Webhook要求必須是公開的HTTPS網址，本機開發階段用 ngrok 產生一個暫時的公開網址：
-
+### 5. 開發階段對外連線
+使用 ngrok 讓LINE能連到本機：
 ```bash
-# 如果還沒安裝 ngrok，先到 https://ngrok.com/download 安裝
 ngrok http 8000
 ```
+將產生的網址設定到 LINE Developers 的 Webhook URL（記得加`/webhook`）。
 
-執行後會顯示一行類似：
-```
-Forwarding  https://xxxx-xx-xx-xxx-xx.ngrok-free.app -> http://localhost:8000
-```
+## API 測試
+啟動伺服器後，開啟 `http://localhost:8000/docs` 可以互動測試所有API端點。
 
-複製這個 `https://xxxx....ngrok-free.app` 網址。
-
-### 6. 設定 Webhook URL
-1. 回到 LINE Developers Console，進你的 Messaging API Channel
-2. 「Messaging API」分頁 → 找到「Webhook settings」
-3. Webhook URL 填入：`https://xxxx....ngrok-free.app/webhook`（**注意結尾要加 /webhook**）
-4. 點擊「Verify」，應該顯示 **Success**
-5. 確認「Use webhook」開關是打開的
-
-### 7. 實際測試
-用手機 LINE 掃描你的官方帳號 QR Code、加入好友。這時候：
-- 終端機（跑 uvicorn 那個視窗）應該印出 `[follow] 新用戶加入好友, user_id=xxxx`
-- 這樣就代表 Webhook 整條路都通了：LINE → ngrok → 你的FastAPI → 簽章驗證通過 → 印出log
-
-## 驗收checklist（對應階段0）
-
-- [ ] `uvicorn app.main:app --reload` 能正常啟動，沒有錯誤
-- [ ] 瀏覽器打開 localhost:8000 看到健康檢查訊息
-- [ ] ngrok 產生公開網址
-- [ ] LINE Developers 的 Webhook Verify 顯示 Success
-- [ ] 手機實際加好友，終端機印出 `[follow]` log
-
-全部打勾，階段0跟階段2的骨架就算完成，可以往階段1（資料庫）走。
-
-## 專案結構
-```
-line-backend/
-├── requirements.txt
-├── .env.example       # 複製成 .env 並填入機密資訊
-├── .env                # 不要commit進版控！
-└── app/
-    ├── __init__.py
-    ├── config.py       # 讀取環境變數
-    └── main.py         # FastAPI主程式 + Webhook端點
-```
-
-之後階段3開始，會陸續在 `app/` 底下新增 `routes/`、`services/`、`db/` 等資料夾，對應實作步驟文件裡的模組。
-
+## 需要跟其他模組（送貨機器人／管理員Dashboard）確認的事項
+1. `/packages/{id}/stored` 確認出發後，如何觸發機器人真正派工（直接呼叫API，或機器人team自行輪詢資料庫）
+2. `departed`／`arrived`／`returned` 三支API，由機器人模組在偵測到對應狀態變化時呼叫
+3. QR Code格式、產生時機、由誰產生
+4. Dashboard串接這些API的方式是否需要調整
