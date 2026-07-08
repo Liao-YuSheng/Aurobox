@@ -74,6 +74,8 @@ def handle_postback_event(event):
     
     action = params.get('action')
     package_id = params.get('package_id')
+    presented_token = params.get('pickup_qr_token')
+    pickup_token_verified = None
     
     if not package_id or not action:
         return
@@ -93,13 +95,27 @@ def handle_postback_event(event):
     elif action == 'cancel':
         package.status = PackageStatus.RETURNED_CANCELLED
         logger.info(f"Package {package_id}: User cancelled")
+
+    elif action == 'pickup_complete':
+        if package.pickup_qr_token and presented_token != package.pickup_qr_token:
+            logger.warning(f"Package {package_id}: pickup_complete rejected due to invalid QR token")
+            return
+
+        package.status = PackageStatus.COMPLETED
+        package.completed_at = datetime.utcnow()
+        package.pickup_qr_token = None
+        pickup_token_verified = True
+        logger.info(f"Package {package_id}: User completed pickup")
     
     package.updated_at = datetime.utcnow()
     
     history = DeliveryHistory(
         package_id=package_id,
         action=f'line_postback_{action}',
-        details={'user_id': user_id}
+        details={
+            'user_id': user_id,
+            'pickup_qr_token_verified': pickup_token_verified,
+        }
     )
     
     db.session.add(history)

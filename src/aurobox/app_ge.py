@@ -6,54 +6,6 @@ from sqlalchemy import text
 from .models import db
 from .config import load_config
 
-
-def _ensure_robot_status_columns(app: Flask) -> None:
-    """Add newly introduced robot_status columns for existing SQLite DB files."""
-    required_columns = {
-        "run_state": "TEXT",
-        "task_state": "TEXT",
-        "is_charging": "INTEGER",
-        "charge_stage": "TEXT",
-    }
-
-    with app.app_context():
-        table_exists = db.session.execute(
-            text("SELECT name FROM sqlite_master WHERE type='table' AND name='robot_status'")
-        ).fetchone()
-        if not table_exists:
-            return
-
-        rows = db.session.execute(text("PRAGMA table_info(robot_status)")).fetchall()
-        existing = {row[1] for row in rows}
-
-        for column, col_type in required_columns.items():
-            if column not in existing:
-                db.session.execute(text(f"ALTER TABLE robot_status ADD COLUMN {column} {col_type}"))
-        db.session.commit()
-
-
-def _ensure_package_columns(app: Flask) -> None:
-    """Add newly introduced package columns for existing SQLite DB files."""
-    required_columns = {
-        "pickup_qr_token": "TEXT",
-    }
-
-    with app.app_context():
-        table_exists = db.session.execute(
-            text("SELECT name FROM sqlite_master WHERE type='table' AND name='packages'")
-        ).fetchone()
-        if not table_exists:
-            return
-
-        rows = db.session.execute(text("PRAGMA table_info(packages)")).fetchall()
-        existing = {row[1] for row in rows}
-
-        for column, col_type in required_columns.items():
-            if column not in existing:
-                db.session.execute(text(f"ALTER TABLE packages ADD COLUMN {column} {col_type}"))
-        db.session.commit()
-
-
 def create_app(config=None):
     """Create and configure Flask app."""
     app = Flask(__name__)
@@ -84,8 +36,7 @@ def create_app(config=None):
     # 创建表
     with app.app_context():
         db.create_all()
-        _ensure_robot_status_columns(app)
-        _ensure_package_columns(app)
+        # 這裡我們已經拿掉舊版的 package 與 robot_status 欄位檢查
     
     # 注册蓝图
     from .api import api_bp

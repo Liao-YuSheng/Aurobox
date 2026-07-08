@@ -222,11 +222,18 @@ def package_arrived(package_id):
     db.session.commit()
 
     try:
+        map_name = current_app.config.get('DEFAULT_MAP_NAME')
+        if not map_name:
+            return jsonify({
+                'error': 'DEFAULT_MAP_NAME is not configured',
+                'status': 'failed',
+            }), 500
+
         controller = get_controller()
         qr_display_result = controller.custom_call(
             sn=current_app.config.get('ROBOT_SN'),
             shop_id=current_app.config.get('SHOP_ID'),
-            map_name=current_app.config.get('DEFAULT_MAP_NAME', 'map1'),
+            map_name=map_name,
             point=package.address,
             point_type='table',
             call_device_name='dashboard',
@@ -237,6 +244,16 @@ def package_arrived(package_id):
             },
             priority=1,
         )
+
+        if qr_display_result.get('message') != 'SUCCESS':
+            return jsonify({
+                'status': 'failed',
+                'error': 'QR display command rejected by robot platform',
+                'arrived_at': package.arrived_at.isoformat(),
+                'pickup_qr_token': pickup_qr_token,
+                'pickup_qr_text': '請掃描 QR Code 取件',
+                'pickup_qr_display_result': qr_display_result,
+            }), 502
     except Exception as e:
         qr_display_result = {'error': str(e)}
     
@@ -280,7 +297,7 @@ def package_cancel(package_id):
 
 @api_bp.route('/packages/<package_id>/pickup-complete', methods=['POST'])
 def package_pickup_complete(package_id):
-    """User scanned QR code and picked up package."""
+    """User scanned QR code and marked pickup complete."""
     package = Package.query.get(package_id)
     if not package:
         return jsonify({'error': 'Package not found'}), 404

@@ -2,11 +2,50 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
+import os
 
 from datetime import datetime, timezone
 from email.utils import format_datetime
+from logging.handlers import RotatingFileHandler
 
 import requests
+
+
+def _create_robot_command_logger() -> logging.Logger:
+    """Create a dedicated logger for robot instruction events."""
+    logger = logging.getLogger("aurobox.robot_commands")
+    if logger.handlers:
+        return logger
+
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+
+    formatter = logging.Formatter(
+        "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+    )
+
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(formatter)
+    logger.addHandler(stream_handler)
+
+    instance_dir = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "..", "instance")
+    )
+    os.makedirs(instance_dir, exist_ok=True)
+    file_handler = RotatingFileHandler(
+        os.path.join(instance_dir, "robot_commands.log"),
+        maxBytes=1_000_000,
+        backupCount=3,
+        encoding="utf-8",
+    )
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+
+    return logger
+
+
+robot_command_logger = _create_robot_command_logger()
 
 
 class PuduAuth:
@@ -51,6 +90,26 @@ class PuduApiClient:
         self.app_key = app_key
         self.app_secret = app_secret
         self.timeout = timeout
+
+    @staticmethod
+    def _log_robot_instruction(action: str, payload: dict, response: dict | None = None) -> None:
+        """Log robot instruction requests and responses in a single structured line."""
+        log_data = {
+            "action": action,
+            "payload": payload,
+        }
+        if response is not None:
+            log_data["response"] = response
+        robot_command_logger.info(json.dumps(log_data, ensure_ascii=False, sort_keys=True))
+
+    @staticmethod
+    def _log_robot_instruction_error(action: str, payload: dict, error: Exception) -> None:
+        log_data = {
+            "action": action,
+            "payload": payload,
+            "error": str(error),
+        }
+        robot_command_logger.error(json.dumps(log_data, ensure_ascii=False, sort_keys=True))
 
     def _build_path(self, endpoint: str, params: dict | None = None) -> str:
         if not params:
@@ -138,16 +197,30 @@ class PuduApiClient:
         )
 
     def open_map(self, shop_id: str | int, map_name: str) -> dict:
-        return self._get(
-            "/pudu-entry/map-service/v1/open/map",
-            {"shop_id": shop_id, "map_name": map_name},
-        )
+        payload = {"shop_id": shop_id, "map_name": map_name}
+        try:
+            result = self._get(
+                "/pudu-entry/map-service/v1/open/map",
+                payload,
+            )
+            self._log_robot_instruction("open_map", payload, result)
+            return result
+        except Exception as e:
+            self._log_robot_instruction_error("open_map", payload, e)
+            raise
 
     def recharge(self, sn: str) -> dict:
-        return self._get(
-            "/pudu-entry/open-platform-service/v2/recharge",
-            {"sn": sn},
-        )
+        payload = {"sn": sn}
+        try:
+            result = self._get(
+                "/pudu-entry/open-platform-service/v2/recharge",
+                payload,
+            )
+            self._log_robot_instruction("recharge", payload, result)
+            return result
+        except Exception as e:
+            self._log_robot_instruction_error("recharge", payload, e)
+            raise
 
     def custom_call(
         self,
@@ -178,10 +251,16 @@ class PuduApiClient:
             "filter_category_ids": filter_category_ids or [],
             "priority": priority,
         }
-        return self._post(
-            "/pudu-entry/open-platform-service/v1/custom_call",
-            payload,
-        )
+        try:
+            result = self._post(
+                "/pudu-entry/open-platform-service/v1/custom_call",
+                payload,
+            )
+            self._log_robot_instruction("custom_call", payload, result)
+            return result
+        except Exception as e:
+            self._log_robot_instruction_error("custom_call", payload, e)
+            raise
 
     def get_map_list(self, sn: str) -> dict:
         return self._get(
@@ -198,15 +277,28 @@ class PuduApiClient:
     def control_doors(self, sn: str, door_number: str, operation: bool) -> dict:
         """
         控制單一艙門的開關。
+        Pudu endpoint expects control states under payload.control_states.
         :param door_number: 艙門編號 (例如 "H_01", "H_02")
         :param operation: True 打開, False 關閉
         """
         payload = {
             "sn": sn,
-            "door_number": door_number,
-            "operation": operation
+            "payload": {
+                "control_states": [
+                    {
+                        "operation": operation,
+                        "door_number": door_number,
+                    }
+                ]
+            }
         }
-        return self._post(
-            "/pudu-entry/open-platform-service/v1/control_doors",
-            payload,
-        )
+        try:
+            result = self._post(
+                "/pudu-entry/open-platform-service/v1/control_doors",
+                payload,
+            )
+            self._log_robot_instruction("control_doors", payload, result)
+            return result
+        except Exception as e:
+            self._log_robot_instruction_error("control_doors", payload, e)
+            raise

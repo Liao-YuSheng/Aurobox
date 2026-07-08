@@ -14,6 +14,7 @@ def load_config():
         "APP_SECRET": os.getenv("Pd_secret"),
         "SHOP_ID": os.getenv("Aurotek_id"),
         "DEFAULT_SN": os.getenv("FLASHBOT_SN", "8FF055923050007"),
+        "DEFAULT_MAP_NAME": os.getenv("DEFAULT_MAP_NAME", ""),
     }
 
 
