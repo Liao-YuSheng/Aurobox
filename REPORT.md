@@ -66,6 +66,16 @@
 - [x] 不再用單一 `run_state` 當唯一動作判斷依據
 - [x] 上游 API 失敗時回傳對應 HTTP 錯誤碼（例如 401 / 502），避免一律 500
 
+#### 4.1 **Webhook 對外對接入口** (`webhooks.py`) ✓
+端點: `POST /webhooks/line`
+
+實現內容：
+- [x] 作為外部 LINE 平台打入的事件入口
+- [x] 驗證 `X-Line-Signature`，簽章錯誤回傳 `403`
+- [x] 支援 `postback` 事件並回寫包裹狀態（`pickup_now` / `later` / `cancel`）
+- [x] 支援 `message` 事件記錄文字訊息日誌
+- [x] 提供推播通知函式（出發、送達、退回）
+
 #### 5. **管理員服務** (`manager.py`) ✓
 核心功能：
 
