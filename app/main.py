@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Optional
 
 from fastapi import FastAPI, Request, HTTPException, Depends
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, HTMLResponse
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
@@ -15,7 +15,7 @@ from linebot.v3.webhooks import MessageEvent, PostbackEvent, FollowEvent, Unfoll
 
 from app.config import settings
 from app.db import get_db, SessionLocal
-from app.models import LineBinding, Package
+from app.models import LineBinding, Package, PackageRecipient
 from app.line_messaging import (
     reply_welcome_with_binding_instructions,
     reply_text,
@@ -70,7 +70,7 @@ async def line_webhook(request: Request):
 
         elif isinstance(event, PostbackEvent):
             print(f"[postback] user_id={event.source.user_id}, data={event.postback.data}")
-            handle_postback(event.postback.data, event.reply_token)
+            handle_postback(event.postback.data, event.reply_token, event.source.user_id)
 
         elif isinstance(event, MessageEvent):
             if isinstance(event.message, TextMessageContent):
@@ -145,8 +145,12 @@ def handle_my_packages_query(line_user_id: str, reply_token: str):
     finally:
         db.close()
 
+def get_recipients(db: Session, package_id: str) -> list:
+    """查詢這筆包裹當初通知過的所有LINE User ID"""
+    rows = db.query(PackageRecipient).filter(PackageRecipient.package_id == package_id).all()
+    return [row.line_user_id for row in rows]
 
-def handle_postback(data: str, reply_token: str):
+def handle_postback(data: str, reply_token: str, triggered_by: str):
     """解析postback的data參數，格式類似 action=PICKUP_NOW&package_id=xxx"""
     params = dict(item.split("=") for item in data.split("&"))
     action = params.get("action")
@@ -183,9 +187,20 @@ def handle_postback(data: str, reply_token: str):
                 package.status = "returned_cancelled"
                 db.commit()
                 reply_text(reply_token, "已為您安排退回，包裹將送回管理室")
+
+                triggered_binding = db.query(LineBinding).filter(
+                    LineBinding.line_user_id == triggered_by
+                ).first()
+                triggered_name = triggered_binding.name if triggered_binding else "同門牌住戶"
+
+                for line_user_id in get_recipients(db, package_id):
+                    if line_user_id != triggered_by:
+                        push_status_update(
+                            line_user_id,
+                            f"{triggered_name} 已將包裹安排退回，包裹將送回管理室",
+                        )
             else:
                 reply_text(reply_token, "這筆包裹目前無法取消")
-
     finally:
         db.close()
 
@@ -222,10 +237,13 @@ async def create_package(payload: CreatePackageRequest, db: Session = Depends(ge
     db.refresh(package)
 
     for binding in targets:
+        db.add(PackageRecipient(package_id=package.id, line_user_id=binding.line_user_id))
+    db.commit()
+
+    for binding in targets:
         push_arrival_notification(binding.line_user_id, str(package.id), payload.unit)
 
     return {"status": "ok", "package_id": str(package.id), "notified_count": len(targets)}
-
 
 # ========== 階段3.4 管理員確認出發（放貨+派工合併） ==========
 
@@ -244,7 +262,8 @@ async def confirm_dispatch(package_id: str, db: Session = Depends(get_db)):
     package.status = "delivering"
     db.commit()
 
-    push_status_update(package.line_user_id, "機器人已出發，包裹正在配送中，請稍候")
+    for line_user_id in get_recipients(db, package_id):
+        push_status_update(line_user_id, "機器人已出發，包裹正在配送中，請稍候")
 
     return {"status": "ok", "package_id": str(package.id), "new_status": package.status}
 
@@ -267,7 +286,8 @@ async def robot_arrived(package_id: str, db: Session = Depends(get_db)):
     package.arrived_at = datetime.utcnow()
     db.commit()
 
-    push_arrived_notification(package.line_user_id, str(package.id))
+    for line_user_id in get_recipients(db, package_id):
+        push_arrived_notification(line_user_id, str(package.id))
 
     return {"status": "ok", "package_id": str(package.id), "new_status": package.status}
 
@@ -291,7 +311,8 @@ async def pickup_verify(package_id: str, db: Session = Depends(get_db)):
         )
 
     # TODO(階段3.6.1): 這裡之後要驗證掃到的QR Code內容是否合法、有沒有過期
-    push_pickup_complete_button(package.line_user_id, str(package.id))
+    for line_user_id in get_recipients(db, package_id):
+        push_pickup_complete_button(line_user_id, str(package.id))
 
     return {"status": "ok", "message": "驗證通過，艙門已開啟"}
 
@@ -312,7 +333,8 @@ async def pickup_complete(package_id: str, db: Session = Depends(get_db)):
     package.status = "completed"
     db.commit()
 
-    push_status_update(package.line_user_id, "取貨完成，感謝使用！")
+    for line_user_id in get_recipients(db, package_id):
+        push_status_update(line_user_id, "取貨完成，感謝使用！")
 
     return {"status": "ok", "package_id": str(package.id), "new_status": package.status}
 
@@ -333,7 +355,8 @@ def check_pickup_timeout():
         )
         for package in overdue_packages:
             package.status = "returned_timeout"
-            push_status_update(package.line_user_id, "⏰ 已逾時未取，包裹已退回管理室")
+            for line_user_id in get_recipients(db, str(package.id)):
+                push_status_update(line_user_id, "⏰ 已逾時未取，包裹已退回管理室")
             print(f"[逾時自動退回] package_id={package.id}")
         db.commit()
     finally:
@@ -367,3 +390,111 @@ async def robot_returned(package_id: str, db: Session = Depends(get_db)):
     # TODO(階段3.9): 之後透過SSE通知Dashboard，目前先只記錄log
 
     return {"status": "ok", "package_id": str(package.id)}
+
+# ========== QR Code 掃描 LIFF ==========
+
+@app.get("/liff/scan", response_class=HTMLResponse)
+async def liff_scan_page():
+    html = LIFF_SCAN_HTML.replace("__LIFF_ID__", settings.LIFF_ID)
+    return HTMLResponse(content=html)
+
+
+LIFF_SCAN_HTML = """
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>掃描取貨</title>
+  <script charset="utf-8" src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+  <style>
+    body { font-family: sans-serif; padding: 20px; text-align: center; }
+    button { width: 100%; padding: 14px; font-size: 18px; background: #06C755; color: white; border: none; border-radius: 6px; margin-top: 20px; }
+    #message { margin-top: 16px; font-weight: bold; }
+  </style>
+</head>
+<body>
+  <h2>掃描機器人上的 QR Code</h2>
+  <p>請對準機器人螢幕上顯示的 QR Code 進行掃描</p>
+  <button onclick="startScan()">開啟相機掃描</button>
+  <div id="message"></div>
+
+  <script>
+    const LIFF_ID = "__LIFF_ID__";
+    let packageId = null;
+
+    function getPackageIdFromUrl() {
+      const params = new URLSearchParams(window.location.search);
+      return params.get("package_id");
+    }
+
+    async function initLiff() {
+      await liff.init({ liffId: LIFF_ID });
+      if (!liff.isLoggedIn()) {
+        liff.login();
+        return;
+      }
+      packageId = getPackageIdFromUrl();
+      if (!packageId) {
+        document.getElementById("message").textContent = "缺少包裹資訊，請從LINE通知重新進入";
+      }
+    }
+
+    async function startScan() {
+      const messageEl = document.getElementById("message");
+      try {
+        const result = await liff.scanCodeV2();
+        const scannedContent = result.value;
+
+        const response = await fetch(`/packages/${packageId}/pickup-complete`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ scanned_content: scannedContent }),
+        });
+
+        if (!response.ok) {
+          const err = await response.json();
+          throw new Error(err.detail || "驗證失敗");
+        }
+
+        messageEl.style.color = "green";
+        messageEl.textContent = "驗證成功！艙門已開啟，請取出您的包裹，可以關閉此頁面了。";
+      } catch (e) {
+        messageEl.style.color = "red";
+        messageEl.textContent = "掃描失敗：" + e.message;
+      }
+    }
+
+    initLiff();
+  </script>
+</body>
+</html>
+"""
+
+class PickupVerifyRequest(BaseModel):
+    scanned_content: Optional[str] = None
+
+
+@app.post("/packages/{package_id}/pickup-complete")
+async def pickup_verify(package_id: str, payload: PickupVerifyRequest = None, db: Session = Depends(get_db)):
+    """
+    掃碼驗證通過、開門這一步。
+    目前簡化：先不做真正的QR Code比對，等機器人模組完成後再補上驗證邏輯（見階段3.6.1）。
+    """
+    package = db.query(Package).filter(Package.id == package_id).first()
+    if not package:
+        raise HTTPException(status_code=404, detail="找不到這筆包裹")
+
+    if package.status != "arrived":
+        raise HTTPException(
+            status_code=400,
+            detail=f"這筆包裹目前狀態是 {package.status}，不是等待取貨的狀態",
+        )
+
+    # TODO(階段3.6.1): 這裡之後要驗證 payload.scanned_content 是否合法、有沒有過期
+    print(f"[掃碼內容] package_id={package_id}, scanned_content={payload.scanned_content if payload else None}")
+
+    for line_user_id in get_recipients(db, package_id):
+        push_pickup_complete_button(line_user_id, str(package.id))
+
+    return {"status": "ok", "message": "驗證通過，艙門已開啟"}

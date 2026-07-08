@@ -102,7 +102,7 @@ def push_status_update(line_user_id: str, text: str):
 
 
 def push_arrived_notification(line_user_id: str, package_id: str):
-    """機器人抵達時，推播提醒+暫時無法取貨按鈕"""
+    """機器人抵達時，推播提醒+開啟掃碼+暫時無法取貨按鈕"""
     contents = {
         "type": "bubble",
         "header": {
@@ -122,7 +122,18 @@ def push_arrived_notification(line_user_id: str, package_id: str):
         "footer": {
             "type": "box",
             "layout": "vertical",
+            "spacing": "sm",
             "contents": [
+                {
+                    "type": "button",
+                    "style": "primary",
+                    "color": "#029C4D",
+                    "action": {
+                        "type": "uri",
+                        "label": "開啟相機掃碼",
+                        "uri": f"https://liff.line.me/{settings.LIFF_ID}?package_id={package_id}",
+                    },
+                },
                 {
                     "type": "button",
                     "style": "secondary",
@@ -135,6 +146,15 @@ def push_arrived_notification(line_user_id: str, package_id: str):
             ],
         },
     }
+
+    with ApiClient(configuration) as api_client:
+        line_bot_api = MessagingApi(api_client)
+        line_bot_api.push_message(
+            PushMessageRequest(
+                to=line_user_id,
+                messages=[FlexMessage(alt_text="機器人已抵達", contents=FlexContainer.from_dict(contents))],
+            )
+        )
 
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)

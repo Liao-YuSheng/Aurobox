@@ -34,3 +34,9 @@ class LineBinding(Base):
     bound_at = Column(DateTime, default=datetime.utcnow)
     status = Column(String(20), default="active")               # active / inactive
     solo_notify = Column(Boolean, nullable=False, default=False)   # 是否限本人接收包裹通知
+
+class PackageRecipient(Base):
+    __tablename__ = "package_recipients"
+
+    package_id = Column(UUID(as_uuid=True), primary_key=True)
+    line_user_id = Column(String(100), primary_key=True)
