@@ -1,6 +1,10 @@
 import os
 
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+except ModuleNotFoundError:  # pragma: no cover - fallback for minimal test environments
+    def load_dotenv(*args, **kwargs):
+        return False
 
 
 load_dotenv()

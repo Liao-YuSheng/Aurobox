@@ -1,471 +1,353 @@
-"""API routes for package management and dashboard."""
+"""API routes for Robot Hardware & Door management."""
 
 from flask import Blueprint, request, jsonify, current_app
-from datetime import datetime, timedelta
-import requests
-import secrets
 from . import db
-from .models import Package, Door, RobotStatus, DeliveryHistory, PackageStatus, DoorStatus, LoadingStatus
+from .models import Door, DoorStatus
 from .robot import FlashbotController
 from .config import load_config
-import uuid
 
 api_bp = Blueprint('api', __name__)
-
 
 def get_controller():
     """Get FlashbotController instance."""
     return FlashbotController(load_config())
 
+def check_and_return_home_if_empty():
+    """檢查是否所有艙門都為 EMPTY，若是則命令機器人返回管理室"""
+    sn = current_app.config.get('ROBOT_SN')
+    
+    # 尋找還有貨(不等於 EMPTY)的門
+    non_empty_doors = Door.query.filter(
+        Door.sn == sn, 
+        Door.status != DoorStatus.EMPTY
+    ).count()
+    
+    if non_empty_doors == 0:
+        controller = get_controller()
+        map_name = current_app.config.get('DEFAULT_MAP_NAME')
+        home_point = current_app.config.get('HOME_POINT_NAME', '喵喵待機') 
+        
+        controller.custom_call2(
+            sn=sn,
+            map_name=map_name,
+            point=home_point,
+            point_type='table',
+            call_device_name='dashboard'
+        )
+        return True
+    return False
 
-def _build_pickup_qr_token(package: Package) -> str:
-    """Generate a stable pickup token for QR code display and verification."""
-    if package.pickup_qr_token:
-        return package.pickup_qr_token
-
-    token = secrets.token_urlsafe(24)
-    package.pickup_qr_token = token
-    return token
-
-
-# ============== Package Management APIs ==============
-
-@api_bp.route('/packages', methods=['POST'])
-def create_package():
+# ==========================================================
+# 0. 分派空艙門並為管理員開門 (Assign & Open)
+# ==========================================================
+@api_bp.route('/doors/assign', methods=['POST'])
+def assign_door_for_package():
     """
-    Create a new package delivery record.
-    POST /api/packages
+    中央大腦通知：準備裝載包裹。
+    【本機動作】：尋找空艙門 -> 將機器人叫回管理室(若不在) -> 打開該艙門。
     """
     data = request.get_json()
+    package_id = data.get('package_id')
     
-    if not data:
-        return jsonify({'error': 'No data provided'}), 400
-    
-    # 驗證必需字段
-    required = ['phone_number', 'address']
-    if not all(k in data for k in required):
-        return jsonify({'error': f'Missing required fields: {required}'}), 400
-    
-    try:
-        package = Package(
-            id=str(uuid.uuid4()),
-            phone_number=data['phone_number'],
-            address=data['address'],
-            status=PackageStatus.PENDING,
-            notes=data.get('notes', '')
-        )
+    if not package_id:
+        return jsonify({'error': 'package_id is required'}), 400
         
-        db.session.add(package)
+    sn = current_app.config.get('ROBOT_SN')
+    controller = get_controller()
+    
+    # 1. 尋找一個狀態為 EMPTY 的艙門
+    empty_door = Door.query.filter_by(sn=sn, status=DoorStatus.EMPTY).first()
+    
+    if not empty_door:
+        return jsonify({'error': 'No empty doors available'}), 400
+        
+    try:
+        # 2. 呼叫機器人前往管理室 (可選：如果確定它已經在管理室可省略，或由另一個 dispatch API 處理)
+        map_name = current_app.config.get('DEFAULT_MAP_NAME')
+        home_point = current_app.config.get('HOME_POINT_NAME', '管理室') 
+        controller.custom_call2(
+            sn=sn, map_name=map_name, point=home_point, 
+            point_type='table', call_device_name='dashboard'
+        )
+
+        # 3. 呼叫普渡 API：打開分配到的艙門
+        controller.control_doors(sn=sn, door_number=empty_door.door_number, operation=True)
+        
+        # 4. 更新資料庫狀態為 ASSIGNED
+        # 注意：需確保你的 models.py 裡面的 DoorStatus 已經有 ASSIGNED 這個列舉
+        empty_door.package_id = package_id
+        empty_door.status = DoorStatus.ASSIGNED
         db.session.commit()
         
         return jsonify({
-            'id': package.id,
-            'status': package.status,
-            'created_at': package.created_at.isoformat()
-        }), 201
-    
+            'status': 'success', 
+            'message': f'Door {empty_door.door_number} assigned and opened for {package_id}',
+            'door_number': empty_door.door_number
+        })
     except Exception as e:
-        db.session.rollback()
         return jsonify({'error': str(e)}), 500
 
-
-@api_bp.route('/packages/<package_id>', methods=['GET'])
-def get_package(package_id):
-    """Get package details."""
-    package = Package.query.get(package_id)
-    
-    if not package:
-        return jsonify({'error': 'Package not found'}), 404
-    
-    return jsonify({
-        'id': package.id,
-        'phone_number': package.phone_number,
-        'address': package.address,
-        'door_number': package.door_number,
-        'status': package.status,
-        'created_at': package.created_at.isoformat(),
-        'updated_at': package.updated_at.isoformat(),
-        'arrived_at': package.arrived_at.isoformat() if package.arrived_at else None,
-        'completed_at': package.completed_at.isoformat() if package.completed_at else None,
-    })
-
-
-@api_bp.route('/packages/<package_id>/response', methods=['POST'])
-def package_response(package_id):
+# ==========================================================
+# 1. 管理員將包裹放入艙門並確認 (Load)
+# ==========================================================
+@api_bp.route('/doors/<door_number>/load', methods=['POST'])
+def load_package_to_door(door_number):
     """
-    Handle user response to package notification.
-    User can choose to pickup now or pickup later.
+    中央大腦通知：管理員已將包裹放入指定艙門。
+    【本機動作】：關閉艙門 -> 狀態改為 FULL。
     """
-    package = Package.query.get(package_id)
-    if not package:
-        return jsonify({'error': 'Package not found'}), 404
-    
     data = request.get_json()
-    action = data.get('action')  # 'pickup_now' or 'later'
+    package_id = data.get('package_id') # 再次核對用，也可省略只用 door_number
     
-    if action == 'pickup_now':
-        package.status = PackageStatus.PICKUP_NOW
-    elif action == 'later':
-        package.status = PackageStatus.LATER
-    else:
-        return jsonify({'error': 'Invalid action'}), 400
+    sn = current_app.config.get('ROBOT_SN')
+    door = Door.query.filter_by(door_number=door_number, sn=sn).first()
     
-    package.updated_at = datetime.utcnow()
-    db.session.commit()
-    
-    # 記錄歷史
-    history = DeliveryHistory(
-        package_id=package_id,
-        action=f'user_response_{action}',
-        details={'action': action}
-    )
-    db.session.add(history)
-    db.session.commit()
-    
-    return jsonify({'status': 'success', 'package_status': package.status})
+    # 確保該門有被指派
+    if not door or door.status != DoorStatus.ASSIGNED:
+        return jsonify({'error': 'Door is not in ASSIGNED state'}), 400
 
-
-@api_bp.route('/packages/<package_id>/stored', methods=['POST'])
-def package_stored(package_id):
-    """
-    Manager confirms package is loaded into door.
-    Update door allocation and status.
-    """
-    package = Package.query.get(package_id)
-    if not package:
-        return jsonify({'error': 'Package not found'}), 404
+    controller = get_controller()
     
-    data = request.get_json()
-    door_number = data.get('door_number')
-    
-    if not door_number:
-        return jsonify({'error': 'door_number is required'}), 400
-    
-    package.door_number = door_number
-    package.status = PackageStatus.DELIVERING
-    package.updated_at = datetime.utcnow()
-    
-    # 更新門的狀態
-    door = Door.query.filter_by(door_number=door_number, sn=current_app.config.get('ROBOT_SN')).first()
-    if not door:
-        door = Door(
-            sn=current_app.config.get('ROBOT_SN'),
-            door_number=door_number,
-            package_id=package_id,
-            address=package.address,
-            loading_status=LoadingStatus.LOADED
-        )
-        db.session.add(door)
-    else:
-        door.package_id = package_id
-        door.loading_status = LoadingStatus.LOADED
-        door.address = package.address
-    
-    db.session.commit()
-    
-    # 記錄歷史
-    history = DeliveryHistory(
-        package_id=package_id,
-        action='package_stored',
-        details={'door_number': door_number}
-    )
-    db.session.add(history)
-    db.session.commit()
-    
-    return jsonify({'status': 'success', 'door_number': door_number})
-
-
-@api_bp.route('/packages/<package_id>/departed', methods=['POST'])
-def package_departed(package_id):
-    """Manager confirms robot departure."""
-    package = Package.query.get(package_id)
-    if not package:
-        return jsonify({'error': 'Package not found'}), 404
-    
-    package.status = PackageStatus.DELIVERING
-    package.updated_at = datetime.utcnow()
-    
-    history = DeliveryHistory(
-        package_id=package_id,
-        action='robot_departed',
-        sn=current_app.config.get('ROBOT_SN')
-    )
-    
-    db.session.add(history)
-    db.session.commit()
-    
-    return jsonify({'status': 'success'})
-
-
-@api_bp.route('/packages/<package_id>/arrived', methods=['POST'])
-def package_arrived(package_id):
-    """Robot arrived at destination."""
-    package = Package.query.get(package_id)
-    if not package:
-        return jsonify({'error': 'Package not found'}), 404
-
-    pickup_qr_token = _build_pickup_qr_token(package)
-    qr_display_result = None
-    
-    package.status = PackageStatus.ARRIVED
-    package.arrived_at = datetime.utcnow()
-    package.updated_at = datetime.utcnow()
-    
-    history = DeliveryHistory(
-        package_id=package_id,
-        action='robot_arrived',
-        sn=current_app.config.get('ROBOT_SN'),
-        details={'pickup_qr_token_generated': True}
-    )
-    
-    db.session.add(history)
-    db.session.commit()
-
     try:
-        map_name = current_app.config.get('DEFAULT_MAP_NAME')
-        if not map_name:
-            return jsonify({
-                'error': 'DEFAULT_MAP_NAME is not configured',
-                'status': 'failed',
-            }), 500
-
-        controller = get_controller()
-        qr_display_result = controller.custom_call(
-            sn=current_app.config.get('ROBOT_SN'),
-            shop_id=current_app.config.get('SHOP_ID'),
+        # 1. 呼叫普渡 API：關門
+        controller.control_doors(sn=sn, door_number=door_number, operation=False)
+        
+        # 2. 更新資料庫狀態為 FULL
+        door.status = DoorStatus.FULL
+        # 如果前面 assign 沒寫入 package_id，也可以在這裡寫入
+        if package_id:
+            door.package_id = package_id 
+            
+        db.session.commit()
+        
+        return jsonify({
+            'status': 'success', 
+            'message': f'Door {door_number} closed and marked as FULL with {door.package_id}'
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    
+# ==========================================================
+# 2. 指揮機器人移動 (Dispatch)
+# ==========================================================
+@api_bp.route('/robot/dispatch', methods=['POST'])
+def robot_dispatch():
+    """中央大腦下令：機器人出發前往指定點位 (例如住戶家門口)"""
+    data = request.get_json()
+    target_point = data.get('point')  # 例如傳入 "5F-1"
+    
+    if not target_point:
+        return jsonify({'error': 'point is required'}), 400
+        
+    controller = get_controller()
+    sn = current_app.config.get('ROBOT_SN')
+    map_name = current_app.config.get('DEFAULT_MAP_NAME')
+    
+    try:
+        # 呼叫普渡 API 讓機器人導航到該住址
+        controller.custom_call2(
+            sn=sn,
             map_name=map_name,
-            point=package.address,
+            point=target_point,
             point_type='table',
+            call_device_name='dashboard'
+        )
+        return jsonify({
+            'status': 'success', 
+            'message': f'Robot is moving to {target_point}'
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    
+# ==========================================================
+# 2.5 抵達並顯示 QR Code (Arrived & Show QR)
+# ==========================================================
+@api_bp.route('/packages/<package_id>/show-qr', methods=['POST'])
+def show_qr(package_id):
+    """中央大腦通知：機器人已抵達，請在螢幕上顯示 QR Code"""
+    data = request.get_json()
+    qr_content = data.get('qr_content') # 中央大腦傳來的 token 或 包含 package_id 的 LIFF 網址
+    
+    if not qr_content:
+        return jsonify({'error': 'qr_content is required'}), 400
+        
+    sn = current_app.config.get('ROBOT_SN')
+    controller = get_controller()
+    
+    try:
+        # 呼叫普渡 API 顯示 QR Code 畫面
+        controller.custom_call(
+            sn=sn,
+            shop_id=current_app.config.get('SHOP_ID'),
             call_device_name='dashboard',
             call_mode='QR_CODE',
             mode_data={
-                'qrcode': pickup_qr_token,
-                'text': '請掃描 QR Code 取件',
+                'qrcode': qr_content,
+                'text': '請掃描取件',
             },
-            priority=1,
+            priority=1
         )
-
-        if qr_display_result.get('message') != 'SUCCESS':
-            return jsonify({
-                'status': 'failed',
-                'error': 'QR display command rejected by robot platform',
-                'arrived_at': package.arrived_at.isoformat(),
-                'pickup_qr_token': pickup_qr_token,
-                'pickup_qr_text': '請掃描 QR Code 取件',
-                'pickup_qr_display_result': qr_display_result,
-            }), 502
+        return jsonify({'status': 'success', 'message': 'QR code is now displayed on robot.'})
     except Exception as e:
-        qr_display_result = {'error': str(e)}
+        return jsonify({'error': str(e)}), 500
+    
+# ==========================================================
+# 3. 取消或逾時 (Cancel / Timeout)
+# ==========================================================
+@api_bp.route('/packages/<package_id>/cancel', methods=['POST'])
+def package_cancel(package_id):
+    """
+    中央大腦通知：包裹已被取消或逾時。
+    【本機動作】：強制中斷當前任務(關門、關閉QR畫面)，但保留包裹(DoorStatus.FULL)
+    """
+    sn = current_app.config.get('ROBOT_SN')
+    door = Door.query.filter_by(package_id=package_id, sn=sn).first()
+    
+    if not door:
+        return jsonify({'error': 'Package not found in any door'}), 404
+        
+    controller = get_controller()
+    
+    try:
+        # 1. 物理防呆：確保該艙門是關上的 (避免取消瞬間門還開著)
+        controller.control_doors(sn=sn, door_number=door.door_number, operation=False)
+        
+        # 2. 強制中斷螢幕畫面：取消 QR Code 顯示，恢復預設狀態
+        # (傳入空的或NORMAL的 call_mode 來覆蓋掉前一個 QR_CODE 任務)
+        controller.custom_call(
+            sn=sn, 
+            shop_id=current_app.config.get('SHOP_ID'),
+            call_device_name='dashboard',
+            call_mode='CALL' 
+        )
+        
+        # 3. 保持艙門狀態為 FULL (因為貨物還在裡面)
+        
+        return jsonify({
+            'status': 'success', 
+            'message': f'Task cancelled. Door {door.door_number} closed and UI reset. Package is still inside.'
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# ==========================================================
+# 4. 掃描 QR 碼完成 (Pickup Complete)
+# ==========================================================
+@api_bp.route('/packages/<package_id>/pickup-complete', methods=['POST'])
+def package_pickup_complete(package_id):
+    """
+    中央大腦通知：QR Token 已經在雲端驗證成功。
+    【本機動作】：只負責打開對應的艙門。
+    """
+    sn = current_app.config.get('ROBOT_SN')
+    door = Door.query.filter_by(package_id=package_id, sn=sn).first()
+    
+    if not door:
+        return jsonify({'error': 'Package not found in any door'}), 404
+
+    controller = get_controller()
+    
+    try:
+        # 呼叫普渡 API：開門
+        controller.control_doors(sn=sn, door_number=door.door_number, operation=True)
+        
+        return jsonify({
+            'status': 'success', 
+            'message': f'Door {door.door_number} opened successfully.'
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# ==========================================================
+# 5. 住戶取貨完成 (Complete)
+# ==========================================================
+@api_bp.route('/packages/<package_id>/complete', methods=['POST'])
+def package_complete(package_id):
+    """
+    中央大腦通知：住戶已在 LINE 上確認取走包裹。
+    【本機動作】：關門 -> 標記為空位 -> 檢查是否要自動返航。
+    """
+    sn = current_app.config.get('ROBOT_SN')
+    door = Door.query.filter_by(package_id=package_id, sn=sn).first()
+    
+    if not door:
+        return jsonify({'error': 'Package not found in any door'}), 404
+        
+    controller = get_controller()
+    
+    try:
+        # 1. 呼叫普渡 API：關門
+        controller.control_doors(sn=sn, door_number=door.door_number, operation=False)
+        
+        # 2. 包裹被拿走了，物理上變為空位，釋放艙門
+        door.status = DoorStatus.EMPTY
+        door.package_id = None
+        db.session.commit()
+        
+        # 3. 檢查所有艙門是否全空，若是則呼叫普渡前往「管理室」
+        is_returning = check_and_return_home_if_empty()
+        
+        return jsonify({
+            'status': 'success', 
+            'message': f'Door {door.door_number} closed and freed.',
+            'returning_home': is_returning
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# ==========================================================
+# 6. 機器人退回並清空 (Returned)
+# ==========================================================
+@api_bp.route('/packages/<package_id>/returned', methods=['POST'])
+def package_returned(package_id):
+    """
+    中央大腦通知：因取消或逾時而退回的包裹，管理員已經在管理室實體取出了。
+    【本機動作】：退回的包裹被拿走後，艙門物理上才真正清空，此時釋放艙門。
+    """
+    sn = current_app.config.get('ROBOT_SN')
+    door = Door.query.filter_by(package_id=package_id, sn=sn).first()
+    
+    if not door:
+        return jsonify({'error': 'Package not found in any door'}), 404
+    
+    # 物理狀態現在才是真正的 EMPTY
+    door.status = DoorStatus.EMPTY
+    door.package_id = None
+    db.session.commit()
     
     return jsonify({
         'status': 'success',
-        'arrived_at': package.arrived_at.isoformat(),
-        'pickup_qr_token': pickup_qr_token,
-        'pickup_qr_text': '請掃描 QR Code 取件',
-        'pickup_qr_display_result': qr_display_result,
+        'message': f'Returned package removed by admin. Door {door.door_number} is now freed.'
     })
 
-
-@api_bp.route('/packages/<package_id>/cancel', methods=['POST'])
-def package_cancel(package_id):
-    """User cancel or timeout."""
-    package = Package.query.get(package_id)
-    if not package:
-        return jsonify({'error': 'Package not found'}), 404
+# ==========================================================
+# 7. Dashboard 監控 API (直接查實體機器人與艙門資料庫)
+# ==========================================================
+@api_bp.route('/dashboard/status', methods=['GET'])
+def get_dashboard_status():
+    """讓中央大腦隨時來查勤，回傳機器人即時物理狀態與本機艙門狀態"""
+    sn = current_app.config.get('ROBOT_SN')
+    controller = get_controller()
     
-    data = request.get_json()
-    reason = data.get('reason', 'timeout')  # 'cancelled' or 'timeout'
-    
-    if reason == 'cancelled':
-        package.status = PackageStatus.RETURNED_CANCELLED
-    else:
-        package.status = PackageStatus.RETURNED_TIMEOUT
-    
-    package.updated_at = datetime.utcnow()
-    
-    history = DeliveryHistory(
-        package_id=package_id,
-        action=f'package_cancel_{reason}',
-        details={'reason': reason}
-    )
-    
-    db.session.add(history)
-    db.session.commit()
-    
-    return jsonify({'status': 'success', 'new_status': package.status})
-
-
-@api_bp.route('/packages/<package_id>/pickup-complete', methods=['POST'])
-def package_pickup_complete(package_id):
-    """User scanned QR code and marked pickup complete."""
-    package = Package.query.get(package_id)
-    if not package:
-        return jsonify({'error': 'Package not found'}), 404
-
-    data = request.get_json(silent=True) or {}
-    presented_token = data.get('pickup_qr_token') or request.args.get('pickup_qr_token')
-    if package.pickup_qr_token and presented_token != package.pickup_qr_token:
-        return jsonify({'error': 'Invalid or missing pickup QR token'}), 403
-    
-    package.status = PackageStatus.COMPLETED
-    package.completed_at = datetime.utcnow()
-    package.updated_at = datetime.utcnow()
-    package.pickup_qr_token = None
-    
-    history = DeliveryHistory(
-        package_id=package_id,
-        action='qrcode_scanned',
-        details={'pickup_qr_token_verified': True}
-    )
-    
-    db.session.add(history)
-    db.session.commit()
-    
-    return jsonify({'status': 'success', 'completed_at': package.completed_at.isoformat()})
-
-
-@api_bp.route('/packages/<package_id>/complete', methods=['POST'])
-def package_complete(package_id):
-    """User confirmed pickup and package delivery completed."""
-    package = Package.query.get(package_id)
-    if not package:
-        return jsonify({'error': 'Package not found'}), 404
-    
-    package.status = PackageStatus.COMPLETED
-    package.completed_at = datetime.utcnow()
-    package.updated_at = datetime.utcnow()
-    
-    # 清空對應的艙門
-    if package.door_number:
-        door = Door.query.filter_by(door_number=package.door_number).first()
-        if door:
-            door.loading_status = LoadingStatus.EMPTY
-            door.package_id = None
-            door.address = None
-    
-    history = DeliveryHistory(
-        package_id=package_id,
-        action='delivery_completed',
-    )
-    
-    db.session.add(history)
-    db.session.commit()
-    
-    return jsonify({'status': 'success'})
-
-
-@api_bp.route('/packages/<package_id>/returned', methods=['POST'])
-def package_returned(package_id):
-    """Robot returned to management room."""
-    package = Package.query.get(package_id)
-    if not package:
-        return jsonify({'error': 'Package not found'}), 404
-    
-    history = DeliveryHistory(
-        package_id=package_id,
-        action='robot_returned',
-        sn=current_app.config.get('ROBOT_SN')
-    )
-    
-    db.session.add(history)
-    db.session.commit()
-    
-    return jsonify({'status': 'success'})
-
-
-# ============== Dashboard APIs ==============
-
-@api_bp.route('/dashboard/events', methods=['GET'])
-def dashboard_events():
-    """
-    Get real-time dashboard events.
-    包括機器人狀態、艙門狀態、任務隊列等。
-    """
     try:
-        controller = get_controller()
-        status_summary = controller.get_status_summary()
+        # 1. 直接問普渡硬體：目前電量、動作狀態 (不碰資料庫)
+        live_status = controller.get_status_summary(sn)
         
-        # 更新或創建機器人狀態記錄
-        sn = current_app.config.get('ROBOT_SN')
-        robot = RobotStatus.query.filter_by(sn=sn).first()
-        
-        if not robot:
-            robot = RobotStatus(sn=sn)
-        
-        robot.state = status_summary.get('state', 'Idle')
-        robot.battery_level = status_summary.get('battery_level', 0)
-        robot.current_location = status_summary.get('current_location', '')
-        robot.move_state = status_summary.get('move_state', '')
-        robot.run_state = status_summary.get('run_state', '')
-        robot.task_state = status_summary.get('task_state', '')
-        robot.is_charging = status_summary.get('is_charging')
-        robot.charge_stage = status_summary.get('charge_stage', '')
-        robot.updated_at = datetime.utcnow()
-        
-        db.session.add(robot)
-        db.session.commit()
-        
-        # 獲取任務隊列
-        pending_orders = Package.query.filter_by(status=PackageStatus.PICKUP_NOW).all()
-        delivering_orders = Package.query.filter_by(status=PackageStatus.DELIVERING).all()
-        later_orders = Package.query.filter_by(status=PackageStatus.LATER).all()
-        
-        # 獲取今日歷史記錄
-        today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-        history_orders = Package.query.filter(
-            Package.status.in_([PackageStatus.COMPLETED, PackageStatus.RETURNED_CANCELLED, PackageStatus.RETURNED_TIMEOUT]),
-            Package.completed_at >= today_start
-        ).all()
-        
-        # 獲取艙門狀態
+        # 2. 查本機資料庫：目前四個艙門的使用狀況
         doors = Door.query.filter_by(sn=sn).all()
+        door_states = [{
+            'door_number': door.door_number,
+            'status': door.status,
+            'package_id': door.package_id
+        } for door in doors]
         
         return jsonify({
-            'robot_status': {
-                'state': robot.state,
-                'battery_level': robot.battery_level,
-                'current_location': robot.current_location,
-                'move_state': robot.move_state,
-                'run_state': robot.run_state,
-                'task_state': robot.task_state,
-                'is_charging': robot.is_charging,
-                'charge_stage': robot.charge_stage,
-                'updated_at': robot.updated_at.isoformat()
-            },
-            'task_queue': {
-                'pending_orders': len(pending_orders),
-                'delivering_orders': len(delivering_orders),
-                'later_orders': len(later_orders),
-                'history_count': len(history_orders)
-            },
-            'door_states': [{
-                'door_number': door.door_number,
-                'status': door.status,
-                'loading_status': door.loading_status,
-                'address': door.address,
-                'package_id': door.package_id
-            } for door in doors],
-            'pending_orders': [{
-                'id': p.id,
-                'address': p.address,
-                'door_number': p.door_number,
-                'status': p.status
-            } for p in pending_orders],
-            'delivering_orders': [{
-                'id': p.id,
-                'address': p.address,
-                'door_number': p.door_number,
-                'status': p.status,
-                'arrived_at': p.arrived_at.isoformat() if p.arrived_at else None
-            } for p in delivering_orders]
+            'status': 'success',
+            'data': {
+                'robot_status': live_status,
+                'door_states': door_states
+            }
         })
-
-    except requests.exceptions.HTTPError as e:
-        status_code = e.response.status_code if e.response is not None else 502
-        return jsonify({'error': str(e)}), status_code
-
-    except requests.exceptions.RequestException as e:
-        return jsonify({'error': str(e)}), 502
-    
+        
     except Exception as e:
         return jsonify({'error': str(e)}), 500

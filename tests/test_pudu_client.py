@@ -5,10 +5,18 @@ from aurobox.pudu_client import PuduApiClient
 from aurobox.robot import FlashbotController
 
 
+@pytest.fixture(autouse=True)
+def set_required_env(monkeypatch):
+    monkeypatch.setenv("Pd_key", "test_app_key")
+    monkeypatch.setenv("Pd_secret", "test_app_secret")
+    monkeypatch.setenv("Aurotek_id", "test_shop")
+    monkeypatch.setenv("FLASHBOT_SN", "TEST_SN_001")
+
+
 def test_load_config_has_required_values():
     config = load_config()
-    assert config.get("APP_KEY") is not None
-    assert config.get("APP_SECRET") is not None
+    assert config.get("APP_KEY") == "test_app_key"
+    assert config.get("APP_SECRET") == "test_app_secret"
     assert "PUDU_BASE_URL" in config
 
 
