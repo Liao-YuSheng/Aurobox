@@ -292,31 +292,6 @@ async def robot_arrived(package_id: str, db: Session = Depends(get_db)):
     return {"status": "ok", "package_id": str(package.id), "new_status": package.status}
 
 
-# ========== 階段3.6 住戶取貨（兩階段） ==========
-
-@app.post("/packages/{package_id}/pickup-complete")
-async def pickup_verify(package_id: str, db: Session = Depends(get_db)):
-    """
-    掃碼驗證通過、開門這一步。
-    目前簡化：先不做真正的QR Code比對，等機器人模組完成後再補上驗證邏輯（見階段3.6.1）。
-    """
-    package = db.query(Package).filter(Package.id == package_id).first()
-    if not package:
-        raise HTTPException(status_code=404, detail="找不到這筆包裹")
-
-    if package.status != "arrived":
-        raise HTTPException(
-            status_code=400,
-            detail=f"這筆包裹目前狀態是 {package.status}，不是等待取貨的狀態",
-        )
-
-    # TODO(階段3.6.1): 這裡之後要驗證掃到的QR Code內容是否合法、有沒有過期
-    for line_user_id in get_recipients(db, package_id):
-        push_pickup_complete_button(line_user_id, str(package.id))
-
-    return {"status": "ok", "message": "驗證通過，艙門已開啟"}
-
-
 @app.post("/packages/{package_id}/complete")
 async def pickup_complete(package_id: str, db: Session = Depends(get_db)):
     """用戶按下取貨完成，機器人關門返航"""
@@ -458,7 +433,7 @@ LIFF_SCAN_HTML = """
         }
 
         messageEl.style.color = "green";
-        messageEl.textContent = "驗證成功！艙門已開啟，請取出您的包裹，可以關閉此頁面了。";
+        messageEl.textContent = "驗證成功！艙門已開啟，請取出您的包裹。";
       } catch (e) {
         messageEl.style.color = "red";
         messageEl.textContent = "掃描失敗：" + e.message;

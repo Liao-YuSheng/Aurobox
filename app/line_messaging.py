@@ -156,14 +156,6 @@ def push_arrived_notification(line_user_id: str, package_id: str):
             )
         )
 
-    with ApiClient(configuration) as api_client:
-        line_bot_api = MessagingApi(api_client)
-        line_bot_api.push_message(
-            PushMessageRequest(
-                to=line_user_id,
-                messages=[FlexMessage(alt_text="機器人已抵達", contents=FlexContainer.from_dict(contents))],
-            )
-        )
 
 
 def push_pickup_complete_button(line_user_id: str, package_id: str):
