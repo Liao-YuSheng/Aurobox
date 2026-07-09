@@ -47,7 +47,11 @@ def assign_door_for_package():
     【本機動作】：尋找空艙門 -> 將機器人叫回管理室(若不在) -> 打開該艙門。
     """
     data = request.get_json()
-    package_id = data.get('package_id')
+    package_id = data.get('id')
+
+    print("\n" + "="*40)
+    print(f"包裹 ID : {package_id}")
+    print("="*40 + "\n")
     
     if not package_id:
         return jsonify({'error': 'package_id is required'}), 400
@@ -97,7 +101,12 @@ def load_package_to_door(door_number):
     【本機動作】：關閉艙門 -> 狀態改為 FULL。
     """
     data = request.get_json()
-    package_id = data.get('package_id') # 再次核對用，也可省略只用 door_number
+    package_id = data.get('id') # 再次核對用，也可省略只用 door_number
+
+    print("\n" + "="*40)
+    print(f"艙門編號: {door_number}")
+    print(f"包裹 ID : {package_id}")
+    print("="*40 + "\n")
     
     sn = current_app.config.get('ROBOT_SN')
     door = Door.query.filter_by(door_number=door_number, sn=sn).first()
@@ -134,10 +143,14 @@ def load_package_to_door(door_number):
 def robot_dispatch():
     """中央大腦下令：機器人出發前往指定點位 (例如住戶家門口)"""
     data = request.get_json()
-    target_point = data.get('point')  # 例如傳入 "5F-1"
+    target_unit = data.get('unit')  # 例如傳入 "5F-1"
     
-    if not target_point:
-        return jsonify({'error': 'point is required'}), 400
+    print("\n" + "="*40)
+    print(f"住戶門牌 : {target_unit}")
+    print("="*40 + "\n")
+
+    if not target_unit:
+        return jsonify({'error': 'unit is required'}), 400
         
     controller = get_controller()
     sn = current_app.config.get('ROBOT_SN')
@@ -148,13 +161,13 @@ def robot_dispatch():
         controller.custom_call2(
             sn=sn,
             map_name=map_name,
-            point=target_point,
+            point=target_unit,
             point_type='table',
             call_device_name='dashboard'
         )
         return jsonify({
             'status': 'success', 
-            'message': f'Robot is moving to {target_point}'
+            'message': f'Robot is moving to {target_unit}'
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -162,12 +175,13 @@ def robot_dispatch():
 # ==========================================================
 # 2.5 抵達並顯示 QR Code (Arrived & Show QR)
 # ==========================================================
-@api_bp.route('/packages/<package_id>/show-qr', methods=['POST'])
+@api_bp.route('/packages/show-qr', methods=['POST'])
 def show_qr(package_id):
     """中央大腦通知：機器人已抵達，請在螢幕上顯示 QR Code"""
     data = request.get_json()
-    qr_content = data.get('qr_content') # 中央大腦傳來的 token 或 包含 package_id 的 LIFF 網址
-    
+    package_id = data.get('id')
+    qr_content = package_id
+
     if not qr_content:
         return jsonify({'error': 'qr_content is required'}), 400
         

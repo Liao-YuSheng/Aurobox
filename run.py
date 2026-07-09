@@ -34,8 +34,8 @@ def main():
     app = create_app(config)
     
     print(f"===================================================")
-    print(f"🚀 Flashbot 實體硬體控制伺服器 (小腦) 啟動中...")
-    print(f"📡 監聽位址: http://{args.host}:{args.port}")
+    print(f"Flashbot 硬體控制伺服器啟動中...")
+    print(f"監聽位址: http://{args.host}:{args.port}")
     print(f"===================================================")
     
     # 正式啟動伺服器
