@@ -8,6 +8,7 @@ class FlashbotController:
         config = require_config(config or load_config())
         self.shop_id = config.get("SHOP_ID")
         self.default_sn = config.get("DEFAULT_SN")
+        self.default_map_name = config.get("DEFAULT_MAP_NAME", "")
         self.client = PuduApiClient(
             app_key=config["APP_KEY"],
             app_secret=config["APP_SECRET"],
@@ -142,6 +143,48 @@ class FlashbotController:
             filter_category_ids=filter_category_ids,
             priority=priority,
         )
+
+    def custom_call2(
+        self,
+        payload: dict | None = None,
+        *,
+        sn: str | None = None,
+        shop_id: str | None = None,
+        map_name: str | None = None,
+        point: str | None = None,
+        point_type: str = "table",
+        call_device_name: str = "PythonSDK",
+        call_mode: str = "CALL",
+        mode_data: dict | None = None,
+        do_not_queue: bool = False,
+        robot_group_ids: list | None = None,
+        filter_category_ids: list | None = None,
+        priority: int = 1,
+    ) -> dict:
+        """Reference-style robot call that accepts a full payload and forwards it directly."""
+        if payload is None:
+            payload = {
+                "sn": sn or self.default_sn,
+                "shop_id": shop_id or self.shop_id,
+                "map_name": map_name or self.default_map_name,
+                "point": point,
+                "point_type": point_type,
+                "call_device_name": call_device_name,
+                "call_mode": call_mode,
+                "mode_data": mode_data or {},
+                "do_not_queue": do_not_queue,
+                "robot_group_ids": robot_group_ids or [],
+                "filter_category_ids": filter_category_ids or [],
+                "priority": priority,
+            }
+        else:
+            payload = dict(payload)
+            payload.setdefault("sn", sn or self.default_sn)
+            payload.setdefault("shop_id", shop_id or self.shop_id)
+            if map_name or self.default_map_name:
+                payload.setdefault("map_name", map_name or self.default_map_name)
+
+        return self.client.custom_call2(payload)
     
     def control_doors(self, sn: str | None, door_number: str, operation: bool) -> dict:
         return self.client.control_doors(sn or self.default_sn, door_number, operation)

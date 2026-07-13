@@ -3,16 +3,24 @@
 
 import sys
 import argparse
+import logging
 from pathlib import Path
 
 # 把 src 目錄加入系統路徑，這樣程式才能認得 aurobox 這個套件
 src_path = Path(__file__).parent / 'src'
 sys.path.insert(0, str(src_path))
 
-# ⚠️ 注意：如果你把剛剛的 app_ge.py 檔名保留了，請將這行改為 from aurobox.app_ge import create_app
-# 但強烈建議你直接把它重新命名回 app.py，保持專案整潔！
 from aurobox.app import create_app
 from aurobox.config import load_config, require_config
+
+# =========================================================
+# 新增這段：建立過濾器，並套用到 Flask 預設的 werkzeug 伺服器
+class NoFaviconFilter(logging.Filter):
+    def filter(self, record):
+        return record.getMessage().find("favicon.ico") == -1
+
+logging.getLogger("werkzeug").addFilter(NoFaviconFilter())
+# =========================================================
 
 def main():
     parser = argparse.ArgumentParser(description='Run Aurobox Flashbot Hardware Server')

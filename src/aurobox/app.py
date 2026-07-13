@@ -2,8 +2,48 @@
 
 import os
 from flask import Flask, jsonify
-from .models import db
+from .models import db, Door, DoorStatus
 from .config import load_config
+
+
+DEFAULT_DOOR_NUMBERS = ("H_01", "H_02", "H_03")
+
+
+def ensure_default_doors(app: Flask) -> None:
+    """Ensure default doors exist and reset them to empty at startup."""
+    sn = app.config.get('ROBOT_SN')
+    if not sn:
+        return
+
+    existing_numbers = {
+        row[0]
+        for row in db.session.query(Door.door_number).filter_by(sn=sn).all()
+    }
+
+    missing_numbers = [
+        door_number for door_number in DEFAULT_DOOR_NUMBERS if door_number not in existing_numbers
+    ]
+
+    for door_number in missing_numbers:
+        db.session.add(
+            Door(
+                sn=sn,
+                door_number=door_number,
+                status=DoorStatus.EMPTY.value,
+                package_id=None,
+            )
+        )
+
+    doors = Door.query.filter(
+        Door.sn == sn,
+        Door.door_number.in_(DEFAULT_DOOR_NUMBERS),
+    ).all()
+    for door in doors:
+        door.status = DoorStatus.EMPTY.value
+        door.package_id = None
+
+    if db.session.new or db.session.dirty:
+        db.session.commit()
 
 def create_app(config=None):
     """Create and configure Flask app."""
@@ -31,6 +71,7 @@ def create_app(config=None):
     # 建立表單 (只會建立 Door)
     with app.app_context():
         db.create_all()
+        ensure_default_doors(app)
     
     # 註冊 API 藍圖 (不再註冊 webhooks)
     from .api import api_bp

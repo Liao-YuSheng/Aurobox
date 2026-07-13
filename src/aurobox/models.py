@@ -2,6 +2,7 @@
 
 from datetime import datetime
 from enum import Enum
+from sqlalchemy import event
 from flask_sqlalchemy import SQLAlchemy
 
 db = SQLAlchemy()
@@ -15,14 +16,30 @@ class DoorStatus(str, Enum):
 class Door(db.Model):
     """Door management record."""
     __tablename__ = "doors"
+    __table_args__ = (
+        db.UniqueConstraint("sn", "door_number", name="uq_doors_sn_door_number"),
+        db.CheckConstraint(
+            "door_number IN ('H_01', 'H_02', 'H_03')",
+            name="ck_doors_allowed_numbers",
+        ),
+        db.CheckConstraint(
+            "status IN ('empty', 'assigned', 'full')",
+            name="ck_doors_allowed_status",
+        ),
+    )
 
     id = db.Column(db.Integer, primary_key=True)
     sn = db.Column(db.String(50), nullable=False)
     door_number = db.Column(db.String(10), nullable=False)  # 例如: H_01
-    status = db.Column(db.String(20), default=DoorStatus.EMPTY)
+    status = db.Column(db.String(20), nullable=False, default=DoorStatus.EMPTY.value)
     package_id = db.Column(db.String(100), nullable=True)   # 中央大腦指派的包裹 ID
     
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     def __repr__(self):
         return f"<Door {self.door_number} - {self.status} - Pkg: {self.package_id}>"
+
+
+@event.listens_for(Door, "before_delete")
+def _prevent_door_delete(mapper, connection, target):
+    raise ValueError("Door records are immutable and cannot be deleted.")

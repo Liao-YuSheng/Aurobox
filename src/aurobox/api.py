@@ -26,14 +26,22 @@ def check_and_return_home_if_empty():
         controller = get_controller()
         map_name = current_app.config.get('DEFAULT_MAP_NAME')
         home_point = current_app.config.get('HOME_POINT_NAME', '喵喵待機') 
-        
-        controller.custom_call2(
-            sn=sn,
-            map_name=map_name,
-            point=home_point,
-            point_type='table',
-            call_device_name='dashboard'
-        )
+
+        payload = {
+            'sn': sn,
+            'shop_id': current_app.config.get('SHOP_ID'),
+            'map_name': map_name,
+            'point': home_point,
+            'point_type': 'table',
+            'call_device_name': 'dashboard',
+            'call_mode': 'CALL',
+            'mode_data': {},
+            'do_not_queue': False,
+            'robot_group_ids': [],
+            'filter_category_ids': [],
+            'priority': 1,
+        }
+        controller.custom_call2(payload=payload)
         return True
     return False
 
@@ -69,10 +77,21 @@ def assign_door_for_package():
         # 2. 呼叫機器人前往管理室 (可選：如果確定它已經在管理室可省略，或由另一個 dispatch API 處理)
         map_name = current_app.config.get('DEFAULT_MAP_NAME')
         home_point = current_app.config.get('HOME_POINT_NAME', '喵喵待機') 
-        controller.custom_call2(
-            sn=sn, map_name=map_name, point=home_point, 
-            point_type='table', call_device_name='dashboard'
-        )
+        payload = {
+            'sn': sn,
+            'shop_id': current_app.config.get('SHOP_ID'),
+            'map_name': map_name,
+            'point': home_point,
+            'point_type': 'table',
+            'call_device_name': 'dashboard',
+            'call_mode': 'CALL',
+            'mode_data': {},
+            'do_not_queue': False,
+            'robot_group_ids': [],
+            'filter_category_ids': [],
+            'priority': 1,
+        }
+        controller.custom_call2(payload=payload)
 
         # 3. 呼叫普渡 API：打開分配到的艙門
         controller.control_doors(sn=sn, door_number=empty_door.door_number, operation=True)
@@ -89,6 +108,10 @@ def assign_door_for_package():
             'door_number': empty_door.door_number
         })
     except Exception as e:
+        # 加入這兩行，它會在終端機印出紅色的詳細報錯，告訴你是第幾行出錯
+        import traceback
+        traceback.print_exc()
+        
         return jsonify({'error': str(e)}), 500
 
 # ==========================================================
@@ -148,23 +171,32 @@ def robot_dispatch():
     print("\n" + "="*40, flush=True)
     print(f"住戶門牌 : {target_unit}", flush=True)
     print("="*40 + "\n", flush=True)
-
+    
     if not target_unit:
         return jsonify({'error': 'unit is required'}), 400
         
     controller = get_controller()
     sn = current_app.config.get('ROBOT_SN')
     map_name = current_app.config.get('DEFAULT_MAP_NAME')
+    shop_id = current_app.config.get('SHOP_ID')
     
     try:
-        # 呼叫普渡 API 讓機器人導航到該住址
-        controller.custom_call2(
-            sn=sn,
-            map_name=map_name,
-            point=target_unit,
-            point_type='table',
-            call_device_name='dashboard'
-        )
+        # 比照 reference：組裝 payload 後由 custom_call2 直接轉送
+        payload = {
+            'sn': sn,
+            'shop_id': shop_id,
+            'map_name': map_name,
+            'point': target_unit,
+            'point_type': 'table',
+            'call_device_name': 'dashboard',
+            'call_mode': 'CALL',
+            'mode_data': {},
+            'do_not_queue': False,
+            'robot_group_ids': [],
+            'filter_category_ids': [],
+            'priority': 1,
+        }
+        controller.custom_call2(payload=payload)
         return jsonify({
             'status': 'success', 
             'message': f'Robot is moving to {target_unit}'
@@ -175,11 +207,9 @@ def robot_dispatch():
 # ==========================================================
 # 2.5 抵達並顯示 QR Code (Arrived & Show QR)
 # ==========================================================
-@api_bp.route('/packages/show-qr', methods=['POST'])
+@api_bp.route('/packages/<package_id>/show-qr', methods=['POST'])
 def show_qr(package_id):
     """中央大腦通知：機器人已抵達，請在螢幕上顯示 QR Code"""
-    data = request.get_json()
-    package_id = data.get('id')
     qr_content = package_id
 
     if not qr_content:
@@ -190,17 +220,21 @@ def show_qr(package_id):
     
     try:
         # 呼叫普渡 API 顯示 QR Code 畫面
-        controller.custom_call(
-            sn=sn,
-            shop_id=current_app.config.get('SHOP_ID'),
-            call_device_name='dashboard',
-            call_mode='QR_CODE',
-            mode_data={
+        payload = {
+            'sn': sn,
+            'shop_id': current_app.config.get('SHOP_ID'),
+            'call_device_name': 'dashboard',
+            'call_mode': 'QR_CODE',
+            'mode_data': {
                 'qrcode': qr_content,
                 'text': '請掃描取件',
             },
-            priority=1
-        )
+            'do_not_queue': False,
+            'robot_group_ids': [],
+            'filter_category_ids': [],
+            'priority': 1,
+        }
+        controller.custom_call2(payload=payload)
         return jsonify({'status': 'success', 'message': 'QR code is now displayed on robot.'})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -228,12 +262,18 @@ def package_cancel(package_id):
         
         # 2. 強制中斷螢幕畫面：取消 QR Code 顯示，恢復預設狀態
         # (傳入空的或NORMAL的 call_mode 來覆蓋掉前一個 QR_CODE 任務)
-        controller.custom_call(
-            sn=sn, 
-            shop_id=current_app.config.get('SHOP_ID'),
-            call_device_name='dashboard',
-            call_mode='CALL' 
-        )
+        payload = {
+            'sn': sn,
+            'shop_id': current_app.config.get('SHOP_ID'),
+            'call_device_name': 'dashboard',
+            'call_mode': 'CALL',
+            'mode_data': {},
+            'do_not_queue': False,
+            'robot_group_ids': [],
+            'filter_category_ids': [],
+            'priority': 1,
+        }
+        controller.custom_call2(payload=payload)
         
         # 3. 保持艙門狀態為 FULL (因為貨物還在裡面)
         

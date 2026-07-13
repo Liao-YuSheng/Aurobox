@@ -262,6 +262,19 @@ class PuduApiClient:
             self._log_robot_instruction_error("custom_call", payload, e)
             raise
 
+    def custom_call2(self, payload: dict) -> dict:
+        """Reference-style custom_call API that forwards a prebuilt payload."""
+        try:
+            result = self._post(
+                "/pudu-entry/open-platform-service/v1/custom_call",
+                payload,
+            )
+            self._log_robot_instruction("custom_call2", payload, result)
+            return result
+        except Exception as e:
+            self._log_robot_instruction_error("custom_call2", payload, e)
+            raise
+
     def get_map_list(self, sn: str) -> dict:
         return self._get(
             "/pudu-entry/map-service/v1/open/list",
