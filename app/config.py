@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     LINE_CHANNEL_ACCESS_TOKEN: str = ""
     LIFF_ID: str = ""
     LINE_LOGIN_CHANNEL_ID: str = ""
+    ROBOT_API_BASE_URL: str = ""
     DATABASE_URL: str = "postgresql://user:password@localhost:5432/aurobox_line"
     APP_ENV: str = "development"
 
