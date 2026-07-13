@@ -49,9 +49,9 @@ def assign_door_for_package():
     data = request.get_json()
     package_id = data.get('id')
 
-    print("\n" + "="*40)
-    print(f"包裹 ID : {package_id}")
-    print("="*40 + "\n")
+    print("\n" + "="*40, flush=True)
+    print(f"包裹 ID : {package_id}", flush=True)
+    print("="*40 + "\n", flush=True)
     
     if not package_id:
         return jsonify({'error': 'package_id is required'}), 400
@@ -68,7 +68,7 @@ def assign_door_for_package():
     try:
         # 2. 呼叫機器人前往管理室 (可選：如果確定它已經在管理室可省略，或由另一個 dispatch API 處理)
         map_name = current_app.config.get('DEFAULT_MAP_NAME')
-        home_point = current_app.config.get('HOME_POINT_NAME', '管理室') 
+        home_point = current_app.config.get('HOME_POINT_NAME', '喵喵待機') 
         controller.custom_call2(
             sn=sn, map_name=map_name, point=home_point, 
             point_type='table', call_device_name='dashboard'
@@ -103,10 +103,10 @@ def load_package_to_door(door_number):
     data = request.get_json()
     package_id = data.get('id') # 再次核對用，也可省略只用 door_number
 
-    print("\n" + "="*40)
-    print(f"艙門編號: {door_number}")
-    print(f"包裹 ID : {package_id}")
-    print("="*40 + "\n")
+    print("\n" + "="*40, flush=True)
+    print(f"艙門編號: {door_number}", flush=True)
+    print(f"包裹 ID : {package_id}", flush=True)
+    print("="*40 + "\n", flush=True)
     
     sn = current_app.config.get('ROBOT_SN')
     door = Door.query.filter_by(door_number=door_number, sn=sn).first()
@@ -145,9 +145,9 @@ def robot_dispatch():
     data = request.get_json()
     target_unit = data.get('unit')  # 例如傳入 "5F-1"
     
-    print("\n" + "="*40)
-    print(f"住戶門牌 : {target_unit}")
-    print("="*40 + "\n")
+    print("\n" + "="*40, flush=True)
+    print(f"住戶門牌 : {target_unit}", flush=True)
+    print("="*40 + "\n", flush=True)
 
     if not target_unit:
         return jsonify({'error': 'unit is required'}), 400
