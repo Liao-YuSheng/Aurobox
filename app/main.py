@@ -702,7 +702,7 @@ ADMIN_DASHBOARD_HTML = """
 <div class="card">
   <h2>建立包裹</h2>
   <select id="unitSelect"><option value="">請選擇門牌</option></select>
-  <select id="nameSelect"><option value="">不指定（通知該門牌全部住戶）</option></select>
+  <select id="nameSelect"><option value="">請先選擇門牌</option></select>
   <button onclick="createPackage()">建立包裹並通知</button>
   <div id="createMsg"></div>
 </div>
@@ -737,11 +737,8 @@ function updateNameOptions() {
   const unit = document.getElementById('unitSelect').value;
   const nameSelect = document.getElementById('nameSelect');
   const names = bindingsData.filter(b => b.unit === unit);
-  nameSelect.innerHTML = '<option value="">不指定（通知該門牌全部住戶）</option>' +
-    names.map(b => {
-      const tag = b.solo_notify ? '（限本人）' : '（通知全門牌）';
-      return `<option value="${b.name}">${b.name} ${tag}</option>`;
-    }).join('');
+  nameSelect.innerHTML = '<option value="">請選擇收件人</option>' +
+    names.map(b => `<option value="${b.name}">${b.name}</option>`).join('');
 }
 
 document.getElementById('unitSelect').addEventListener('change', updateNameOptions);
@@ -751,6 +748,7 @@ async function createPackage() {
   const recipient_name = document.getElementById('nameSelect').value;
   const msgEl = document.getElementById('createMsg');
   if (!unit) { msgEl.style.color = 'red'; msgEl.textContent = '請先選擇門牌'; return; }
+  if (!recipient_name) { msgEl.style.color = 'red'; msgEl.textContent = '請選擇收件人'; return; }
 
   try {
     const resp = await fetch('/packages', {
