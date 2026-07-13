@@ -279,7 +279,7 @@ async def confirm_dispatch(package_id: str, payload: ConfirmDispatchRequest = No
     try:
         requests.post(
             f"{settings.ROBOT_API_BASE_URL}/api/robot/dispatch",
-            json={"package_id": package_id, "destination": package.unit},
+            json={"unit": package.unit},
             timeout=5,
         )
     except requests.exceptions.RequestException as e:
@@ -310,12 +310,11 @@ async def robot_arrived(package_id: str, db: Session = Depends(get_db)):
 
     try:
         requests.post(
-            f"{settings.ROBOT_API_BASE_URL}/show-qr",
-            json={"package_id": package_id, "text": "請掃描 QR Code 取件"},
+            f"{settings.ROBOT_API_BASE_URL}/api/packages/{package_id}/pickup-complete",
             timeout=5,
         )
     except requests.exceptions.RequestException as e:
-        print(f"[錯誤] 呼叫機器人顯示QR Code失敗: {e}")
+        print(f"[錯誤] 呼叫機器人開門失敗: {e}")
 
     for line_user_id in get_recipients(db, package_id):
         push_arrived_notification(line_user_id, str(package.id))
@@ -344,8 +343,7 @@ async def pickup_verify(package_id: str, payload: PickupVerifyRequest = None, db
 
     try:
         requests.post(
-            f"{settings.ROBOT_API_BASE_URL}/open-door",
-            json={"package_id": package_id},
+            f"{settings.ROBOT_API_BASE_URL}/api/packages/{package_id}/pickup-complete",
             timeout=5,
         )
     except requests.exceptions.RequestException as e:
@@ -376,8 +374,7 @@ def complete_pickup(package_id: str) -> dict:
 
         try:
             requests.post(
-                f"{settings.ROBOT_API_BASE_URL}/complete",
-                json={"package_id": package_id},
+                f"{settings.ROBOT_API_BASE_URL}/api/packages/{package_id}/complete",
                 timeout=5,
             )
         except requests.exceptions.RequestException as e:
