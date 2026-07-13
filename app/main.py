@@ -17,6 +17,7 @@ from linebot.v3.webhooks import MessageEvent, PostbackEvent, FollowEvent, Unfoll
 from app.config import settings
 from app.db import get_db, SessionLocal
 from app.models import LineBinding, Package, PackageRecipient
+from app.line_verify import verify_liff_id_token
 from app.line_messaging import (
     reply_welcome_with_binding_instructions,
     reply_text,
@@ -196,6 +197,21 @@ def handle_postback(data: str, reply_token: str, triggered_by: str):
         if action == "PICKUP_NOW":
             package.status = "pickup_now"
             db.commit()
+
+            try:
+                resp = requests.post(
+                    f"{settings.ROBOT_API_BASE_URL}/api/doors/assign",
+                    json={"id": package_id},
+                    timeout=5,
+                )
+                if resp.status_code == 200:
+                    package.door_id = resp.json().get("door_number")
+                    db.commit()
+                else:
+                    print(f"[錯誤] 分配艙門失敗: {resp.status_code} {resp.text}")
+            except requests.exceptions.RequestException as e:
+                print(f"[錯誤] 呼叫機器人分配艙門失敗: {e}")
+
             reply_text(reply_token, "已收到您的取貨請求，管理員正在為您準備包裹！")
 
         elif action == "LATER":
@@ -284,6 +300,45 @@ async def create_package(payload: CreatePackageRequest, db: Session = Depends(ge
 
     return {"status": "ok", "package_id": str(package.id), "notified_count": len(targets)}
 
+# ========== 管理員後台 API ==========
+
+@app.get("/admin/packages")
+async def admin_list_packages(db: Session = Depends(get_db)):
+    """給後台頁面用的包裹清單，包含系統指派的艙門"""
+    packages = db.query(Package).order_by(Package.created_at.desc()).all()
+    return [
+        {
+            "id": str(p.id),
+            "unit": p.unit,
+            "status": p.status,
+            "door_id": p.door_id,
+            "created_at": p.created_at.isoformat() if p.created_at else None,
+        }
+        for p in packages
+    ]
+
+
+@app.get("/admin/bindings")
+async def admin_list_bindings(db: Session = Depends(get_db)):
+    """給建立包裹表單用的下拉選單資料，只列出還有效的綁定"""
+    bindings = db.query(LineBinding).filter(LineBinding.status == "active").all()
+    return [
+        {"unit": b.unit, "name": b.name, "line_user_id": b.line_user_id, "solo_notify": b.solo_notify}
+        for b in bindings
+    ]
+
+
+@app.get("/admin/robot-status")
+async def admin_robot_status():
+    """轉發呼叫機器人的即時狀態（位置、電量、三個艙門狀況）"""
+    try:
+        resp = requests.get(f"{settings.ROBOT_API_BASE_URL}/api/dashboard/status", timeout=5)
+        if resp.status_code != 200:
+            return {"status": "error", "detail": f"機器人回應異常: {resp.status_code}"}
+        return resp.json()
+    except requests.exceptions.RequestException as e:
+        return {"status": "error", "detail": f"無法連線到機器人: {e}"}
+
 # ========== 階段3.4 管理員確認出發（放貨+派工合併） ==========
 
 @app.post("/packages/{package_id}/stored")
@@ -299,22 +354,14 @@ async def confirm_dispatch(package_id: str, payload: ConfirmDispatchRequest = No
         )
 
     try:
-        resp = requests.post(
-            f"{settings.ROBOT_API_BASE_URL}/api/doors/assign",
+        requests.post(
+            f"{settings.ROBOT_API_BASE_URL}/api/doors/load",
             json={"id": package_id},
             timeout=5,
         )
-        if resp.status_code == 200:
-            package.door_id = resp.json().get("door_number")
-            requests.post(
-                f"{settings.ROBOT_API_BASE_URL}/api/doors/{package.door_id}/load",
-                json={"id": package_id},
-                timeout=5,
-            )
-        else:
-            print(f"[錯誤] 分配艙門失敗: {resp.status_code} {resp.text}")
     except requests.exceptions.RequestException as e:
-        print(f"[錯誤] 呼叫機器人分配/裝載艙門失敗: {e}")
+        print(f"[錯誤] 呼叫機器人裝載艙門失敗: {e}")
+
 
     package.status = "delivering"
     db.commit()
@@ -322,7 +369,7 @@ async def confirm_dispatch(package_id: str, payload: ConfirmDispatchRequest = No
     try:
         requests.post(
             f"{settings.ROBOT_API_BASE_URL}/api/robot/dispatch",
-            json={"unit": package.unit},
+            json={"unit": package.unit, "package_id": package_id},
             timeout=5,
         )
     except requests.exceptions.RequestException as e:
@@ -366,8 +413,6 @@ async def robot_arrived(package_id: str, db: Session = Depends(get_db)):
     return {"status": "ok", "package_id": str(package.id), "new_status": package.status}
 
 
-from app.line_verify import verify_liff_id_token
-
 @app.post("/packages/{package_id}/pickup-complete")
 async def pickup_verify(package_id: str, payload: PickupVerifyRequest = None, db: Session = Depends(get_db)):
     package = db.query(Package).filter(Package.id == package_id).first()
@@ -398,12 +443,17 @@ async def pickup_verify(package_id: str, payload: PickupVerifyRequest = None, db
         raise HTTPException(status_code=403, detail="您不是這筆包裹的收件人，無法取貨")
 
     try:
-        requests.post(
+        resp = requests.post(
             f"{settings.ROBOT_API_BASE_URL}/api/packages/{package_id}/pickup-complete",
             timeout=5,
         )
     except requests.exceptions.RequestException as e:
-        print(f"[錯誤] 呼叫機器人開門失敗: {e}")
+        print(f"[錯誤] 呼叫機器人開門失敗（連線問題）: {e}")
+        raise HTTPException(status_code=502, detail="無法連線到機器人，請稍後再試或聯繫管理員")
+
+    if resp.status_code != 200:
+        print(f"[錯誤] 機器人開門失敗: {resp.status_code} {resp.text}")
+        raise HTTPException(status_code=502, detail="機器人開門失敗，請聯繫管理員協助取件")
 
     for line_user_id in get_recipients(db, package_id):
         push_pickup_complete_button(line_user_id, str(package.id))
@@ -601,5 +651,198 @@ LIFF_SCAN_HTML = """
 </html>
 """
 
+@app.get("/admin", response_class=HTMLResponse)
+async def admin_dashboard_page():
+    return HTMLResponse(content=ADMIN_DASHBOARD_HTML)
 
+
+ADMIN_DASHBOARD_HTML = """
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>FlashBot Dashboard</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, "PingFang TC", "Microsoft JhengHei", sans-serif;
+    background: #f5f5f5; margin: 0; padding: 20px; color: #222; }
+  h1 { color: #E2231A; font-size: 22px; margin-bottom: 20px; }
+  h2 { font-size: 16px; margin: 0 0 12px 0; color: #333; }
+  .card { background: white; border-radius: 8px; padding: 16px; margin-bottom: 20px;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.1); }
+  select, button { padding: 8px 12px; font-size: 14px; border-radius: 6px;
+    border: 1px solid #ccc; margin-right: 8px; margin-bottom: 8px; }
+  button { background: #E2231A; color: white; border: none; cursor: pointer; }
+  button:hover { background: #c41c14; }
+  button.secondary { background: white; color: #E2231A; border: 1px solid #E2231A; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 8px; border-bottom: 1px solid #eee; }
+  th { color: #888; font-weight: normal; }
+  .status-badge { padding: 2px 8px; border-radius: 10px; font-size: 12px; background: #eee; }
+  .status-pickup_now { background: #fff3cd; color: #856404; }
+  .status-delivering { background: #cce5ff; color: #004085; }
+  .status-arrived { background: #d4edda; color: #155724; }
+  .status-completed { background: #e2e3e5; color: #383d41; }
+  #createMsg { margin-top: 8px; font-size: 14px; }
+  .robot-info { display: flex; gap: 24px; flex-wrap: wrap; margin-bottom: 16px; }
+  .robot-info div { font-size: 14px; }
+  .robot-info b { display: block; color: #888; font-size: 12px; font-weight: normal; }
+  .doors { display: flex; gap: 12px; }
+  .door-box { flex: 1; padding: 12px; border-radius: 6px; text-align: center; font-size: 13px; }
+  .door-EMPTY { background: #e9ecef; color: #666; }
+  .door-ASSIGNED { background: #fff3cd; color: #856404; }
+  .door-FULL { background: #f8d7da; color: #721c24; }
+</style>
+</head>
+<body>
+
+<h1> FlashBot Dashboard</h1>
+
+<div class="card">
+  <h2>建立包裹</h2>
+  <select id="unitSelect"><option value="">請選擇門牌</option></select>
+  <select id="nameSelect"><option value="">不指定（通知該門牌全部住戶）</option></select>
+  <button onclick="createPackage()">建立包裹並通知</button>
+  <div id="createMsg"></div>
+</div>
+
+<div class="card">
+  <h2>機器人狀態 <button class="secondary" onclick="loadRobotStatus()">重新整理</button></h2>
+  <div id="robotInfo" class="robot-info">載入中...</div>
+  <div id="doorInfo" class="doors"></div>
+</div>
+
+<div class="card">
+  <h2>包裹清單 <button class="secondary" onclick="loadPackages()">重新整理</button></h2>
+  <table>
+    <thead><tr><th>門牌</th><th>狀態</th><th>艙門</th><th>建立時間</th><th>操作</th></tr></thead>
+    <tbody id="packageTableBody"><tr><td colspan="5">載入中...</td></tr></tbody>
+  </table>
+</div>
+
+<script>
+let bindingsData = [];
+
+async function loadBindings() {
+  const resp = await fetch('/admin/bindings');
+  bindingsData = await resp.json();
+  const units = [...new Set(bindingsData.map(b => b.unit))];
+  const unitSelect = document.getElementById('unitSelect');
+  unitSelect.innerHTML = '<option value="">請選擇門牌</option>' +
+    units.map(u => `<option value="${u}">${u}</option>`).join('');
+}
+
+function updateNameOptions() {
+  const unit = document.getElementById('unitSelect').value;
+  const nameSelect = document.getElementById('nameSelect');
+  const names = bindingsData.filter(b => b.unit === unit);
+  nameSelect.innerHTML = '<option value="">不指定（通知該門牌全部住戶）</option>' +
+    names.map(b => {
+      const tag = b.solo_notify ? '（限本人）' : '（通知全門牌）';
+      return `<option value="${b.name}">${b.name} ${tag}</option>`;
+    }).join('');
+}
+
+document.getElementById('unitSelect').addEventListener('change', updateNameOptions);
+
+async function createPackage() {
+  const unit = document.getElementById('unitSelect').value;
+  const recipient_name = document.getElementById('nameSelect').value;
+  const msgEl = document.getElementById('createMsg');
+  if (!unit) { msgEl.style.color = 'red'; msgEl.textContent = '請先選擇門牌'; return; }
+
+  try {
+    const resp = await fetch('/packages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ unit, recipient_name: recipient_name || null }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || '建立失敗');
+    msgEl.style.color = 'green';
+    msgEl.textContent = `建立成功，已通知 ${data.notified_count} 位住戶`;
+    loadPackages();
+  } catch (e) {
+    msgEl.style.color = 'red';
+    msgEl.textContent = '錯誤：' + e.message;
+  }
+}
+
+const STATUS_LABEL = {
+  pending: '待處理', later: '稍後再取', pickup_now: '待派送',
+  delivering: '配送中', arrived: '已抵達', completed: '已完成',
+  returned_cancelled: '已退回（取消）', returned_timeout: '已退回（逾時）',
+};
+
+async function loadPackages() {
+  const resp = await fetch('/admin/packages');
+  const packages = await resp.json();
+  const tbody = document.getElementById('packageTableBody');
+  if (packages.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="5">目前沒有包裹</td></tr>';
+    return;
+  }
+  tbody.innerHTML = packages.map(p => {
+    const label = STATUS_LABEL[p.status] || p.status;
+    const createdAt = p.created_at ? p.created_at.replace('T', ' ').slice(0, 16) : '-';
+    const door = p.door_id || '尚未分配';
+    const action = p.status === 'pickup_now'
+      ? `<button onclick="dispatchPackage('${p.id}')">確認派送</button>` : '-';
+    return `<tr>
+      <td>${p.unit}</td>
+      <td><span class="status-badge status-${p.status}">${label}</span></td>
+      <td>${door}</td><td>${createdAt}</td><td>${action}</td>
+    </tr>`;
+  }).join('');
+}
+
+async function dispatchPackage(packageId) {
+  try {
+    const resp = await fetch(`/packages/${packageId}/stored`, { method: 'POST' });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || '派送失敗');
+    loadPackages();
+  } catch (e) {
+    alert('派送失敗：' + e.message);
+  }
+}
+
+async function loadRobotStatus() {
+  const infoEl = document.getElementById('robotInfo');
+  const doorEl = document.getElementById('doorInfo');
+  infoEl.textContent = '載入中...';
+  try {
+    const resp = await fetch('/admin/robot-status');
+    const data = await resp.json();
+    if (data.status === 'error') {
+      infoEl.innerHTML = `<span style="color:red">${data.detail}</span>`;
+      doorEl.innerHTML = '';
+      return;
+    }
+    const robot = data.data.robot_status;
+    const doors = data.data.door_states;
+    infoEl.innerHTML = `
+      <div><b>狀態</b>${robot.state}</div>
+      <div><b>目前位置</b>${robot.current_location || '未知'}</div>
+      <div><b>電量</b>${robot.battery_level}%</div>`;
+    doorEl.innerHTML = doors.map(d => `
+      <div class="door-box door-${d.status}">
+        <div>${d.door_number}</div><div>${d.status}</div>
+        ${d.package_id ? `<div style="font-size:11px">${d.package_id.slice(0,8)}...</div>` : ''}
+      </div>`).join('');
+  } catch (e) {
+    infoEl.innerHTML = `<span style="color:red">無法載入：${e.message}</span>`;
+  }
+}
+
+loadBindings();
+loadPackages();
+loadRobotStatus();
+setInterval(loadPackages, 15000);
+setInterval(loadRobotStatus, 15000);
+</script>
+</body>
+</html>
+"""
 
