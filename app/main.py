@@ -28,7 +28,7 @@ from app.line_messaging import (
 )
 from apscheduler.schedulers.background import BackgroundScheduler
 
-app = FastAPI(title="智連櫃社區 AMR 配送系統 - LINE 後端")
+app = FastAPI(title="AMR 配送系統 - LINE 後端")
 
 parser = WebhookParser(settings.LINE_CHANNEL_SECRET)
 
@@ -99,7 +99,7 @@ def handle_solo_notify_toggle(line_user_id: str, reply_token: str, enable: bool)
             return
         binding.solo_notify = enable
         db.commit()
-        msg = "已開啟：包裹到貨只會通知您本人" if enable else "已關閉：包裹到貨會通知同門牌所有人"
+        msg = "已開啟：包裹到貨只通知您本人" if enable else "已關閉：包裹到貨通知同門牌所有人"
         reply_text(reply_token, msg)
     finally:
         db.close()
@@ -140,7 +140,7 @@ def handle_my_packages_query(line_user_id: str, reply_token: str):
             .all()
         )
         if not packages:
-            reply_text(reply_token, "目前沒有待取的包裹")
+            reply_text(reply_token, "目前沒有待取包裹")
         else:
             reply_later_packages(reply_token, packages)
     finally:
@@ -150,6 +150,32 @@ def get_recipients(db: Session, package_id: str) -> list:
     """查詢這筆包裹當初通知過的所有LINE User ID"""
     rows = db.query(PackageRecipient).filter(PackageRecipient.package_id == package_id).all()
     return [row.line_user_id for row in rows]
+
+def try_assign_door(package_id: str, db: Session) -> bool:
+    """嘗試跟機器人要一個空艙門，成功會把door_id存進package並回傳True"""
+    try:
+        resp = requests.post(
+            f"{settings.ROBOT_API_BASE_URL}/api/doors/assign",
+            json={"id": package_id},
+            timeout=5,
+        )
+    except requests.exceptions.RequestException as e:
+        print(f"[錯誤] 呼叫機器人分配艙門失敗（連線問題）: {e}")
+        return False
+
+    if resp.status_code != 200:
+        print(f"[分配艙門] package_id={package_id} 暫時無法分配：{resp.status_code} {resp.text}")
+        return False
+
+    door_number = resp.json().get("door_number")
+    package = db.query(Package).filter(Package.id == package_id).first()
+    package.door_id = door_number
+    db.commit()
+
+    for line_user_id in get_recipients(db, package_id):
+        push_status_update(line_user_id, f"已為您準備包裹，管理員正在安排放置艙門 {door_number}")
+
+    return True
 
 def handle_postback(data: str, reply_token: str, triggered_by: str):
     """解析postback的data參數，格式類似 action=PICKUP_NOW&package_id=xxx"""
@@ -222,6 +248,7 @@ class ConfirmDispatchRequest(BaseModel):
 
 class PickupVerifyRequest(BaseModel):
     scanned_content: Optional[str] = None
+    id_token: Optional[str] = None
 
 
 @app.post("/packages")
@@ -271,9 +298,25 @@ async def confirm_dispatch(package_id: str, payload: ConfirmDispatchRequest = No
             detail=f"這筆包裹目前狀態是 {package.status}，不是可以派工的狀態",
         )
 
+    try:
+        resp = requests.post(
+            f"{settings.ROBOT_API_BASE_URL}/api/doors/assign",
+            json={"id": package_id},
+            timeout=5,
+        )
+        if resp.status_code == 200:
+            package.door_id = resp.json().get("door_number")
+            requests.post(
+                f"{settings.ROBOT_API_BASE_URL}/api/doors/{package.door_id}/load",
+                json={"id": package_id},
+                timeout=5,
+            )
+        else:
+            print(f"[錯誤] 分配艙門失敗: {resp.status_code} {resp.text}")
+    except requests.exceptions.RequestException as e:
+        print(f"[錯誤] 呼叫機器人分配/裝載艙門失敗: {e}")
+
     package.status = "delivering"
-    if payload and payload.door_id:
-        package.door_id = payload.door_id
     db.commit()
 
     try:
@@ -310,23 +353,23 @@ async def robot_arrived(package_id: str, db: Session = Depends(get_db)):
 
     try:
         requests.post(
-            f"{settings.ROBOT_API_BASE_URL}/api/packages/{package_id}/pickup-complete",
+            f"{settings.ROBOT_API_BASE_URL}/api/packages/{package_id}/show-qr",
+            json={"id": package_id},
             timeout=5,
         )
     except requests.exceptions.RequestException as e:
-        print(f"[錯誤] 呼叫機器人開門失敗: {e}")
+        print(f"[錯誤] 呼叫機器人顯示QR Code失敗: {e}")
 
     for line_user_id in get_recipients(db, package_id):
         push_arrived_notification(line_user_id, str(package.id))
 
     return {"status": "ok", "package_id": str(package.id), "new_status": package.status}
 
+
+from app.line_verify import verify_liff_id_token
+
 @app.post("/packages/{package_id}/pickup-complete")
 async def pickup_verify(package_id: str, payload: PickupVerifyRequest = None, db: Session = Depends(get_db)):
-    """
-    掃碼驗證：住戶掃描機器人螢幕上的QR Code（內容為package_id本身），
-    比對通過後，通知機器人開門。
-    """
     package = db.query(Package).filter(Package.id == package_id).first()
     if not package:
         raise HTTPException(status_code=404, detail="找不到這筆包裹")
@@ -340,6 +383,19 @@ async def pickup_verify(package_id: str, payload: PickupVerifyRequest = None, db
     scanned = payload.scanned_content if payload else None
     if not scanned or scanned != package_id:
         raise HTTPException(status_code=403, detail="取貨碼驗證失敗")
+
+    id_token = payload.id_token if payload else None
+    if not id_token:
+        raise HTTPException(status_code=403, detail="缺少身分驗證資訊，請重新從LINE進入")
+
+    try:
+        claims = verify_liff_id_token(id_token, settings.LINE_LOGIN_CHANNEL_ID)
+    except ValueError as e:
+        raise HTTPException(status_code=403, detail=f"身分驗證失敗：{e}")
+
+    scanning_user_id = claims.get("sub")
+    if scanning_user_id not in get_recipients(db, package_id):
+        raise HTTPException(status_code=403, detail="您不是這筆包裹的收件人，無法取貨")
 
     try:
         requests.post(
@@ -388,13 +444,29 @@ def complete_pickup(package_id: str) -> dict:
         db.close()
 
 
-@app.post("packages/{package_id}/complete")
+@app.post("/packages/{package_id}/complete")
 async def pickup_complete(package_id: str):
     """API路由，給/docs測試或未來Dashboard呼叫用，內部直接轉呼叫上面的邏輯"""
     result = complete_pickup(package_id)
     if not result["ok"]:
         raise HTTPException(status_code=400, detail=result["detail"])
     return {"status": "ok", "package_id": result["package_id"], "new_status": result["new_status"]}
+
+def process_door_queue():
+    """檢查 pickup_now 但尚未分配到艙門的包裹（=排隊中），嘗試重新分配"""
+    db = SessionLocal()
+    try:
+        waiting_packages = (
+            db.query(Package)
+            .filter(Package.status == "pickup_now", Package.door_id.is_(None))
+            .order_by(Package.updated_at)
+            .all()
+        )
+        for package in waiting_packages:
+            if try_assign_door(str(package.id), db):
+                print(f"[排隊處理] package_id={package.id} 已分配到艙門")
+    finally:
+        db.close()
 
 # ========== 階段3.7 逾時自動退回 ==========
 
@@ -498,29 +570,30 @@ LIFF_SCAN_HTML = """
     }
 
     async function startScan() {
-      const messageEl = document.getElementById("message");
-      try {
-        const result = await liff.scanCodeV2();
-        const scannedContent = result.value;
+        const messageEl = document.getElementById("message");
+        try {
+            const result = await liff.scanCodeV2();
+            const scannedContent = result.value;
+            const idToken = liff.getIDToken();
 
-        const response = await fetch(`/packages/${packageId}/pickup-complete`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ scanned_content: scannedContent }),
-        });
+            const response = await fetch(`/packages/${packageId}/pickup-complete`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ scanned_content: scannedContent, id_token: idToken }),
+            });
 
-        if (!response.ok) {
-          const err = await response.json();
-          throw new Error(err.detail || "驗證失敗");
+            if (!response.ok) {
+            const err = await response.json();
+            throw new Error(err.detail || "驗證失敗");
+            }
+
+            messageEl.style.color = "green";
+            messageEl.textContent = "驗證成功！艙門已開啟，請取出您的包裹。";
+        } catch (e) {
+            messageEl.style.color = "red";
+            messageEl.textContent = "掃描失敗：" + e.message;
         }
-
-        messageEl.style.color = "green";
-        messageEl.textContent = "驗證成功！艙門已開啟，請取出您的包裹。";
-      } catch (e) {
-        messageEl.style.color = "red";
-        messageEl.textContent = "掃描失敗：" + e.message;
-      }
-    }
+        }
 
     initLiff();
   </script>
