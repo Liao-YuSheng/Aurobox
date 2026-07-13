@@ -189,6 +189,16 @@ class FlashbotController:
     def control_doors(self, sn: str | None, door_number: str, operation: bool) -> dict:
         return self.client.control_doors(sn or self.default_sn, door_number, operation)
 
+    def custom_content(self, payload: dict | None = None, **kwargs) -> dict:
+        """Forward custom content payload to Pudu API (for screen customization, etc.)."""
+        if payload is None:
+            payload = kwargs
+        else:
+            payload = dict(payload)
+            payload.setdefault("sn", kwargs.get("sn") or self.default_sn)
+
+        return self.client.custom_content(payload)
+
     def wait_until_arrived(self, sn: str | None = None, timeout_seconds: int = 300, poll_interval: int = 3) -> bool:
         """
         輪詢監控機制：每隔 poll_interval 秒詢問一次，直到機器人抵達定點 (ARRIVE)。
@@ -206,8 +216,8 @@ class FlashbotController:
             # 你可以把這行註解掉，這只是開發時用來觀察狀態變化的
             print(f"[{time.strftime('%H:%M:%S')}] 當前移動狀態: {move_state}")
 
-            if move_state == "ARRIVE":
-                print("[系統] 🎯 機器人已成功抵達定點！")
+            if move_state == "IDLE" or move_state == "ARRIVE":
+                print("[系統] 機器人已成功抵達定點！")
                 return True
             
             # 暫停 poll_interval 秒後再問一次 (避免塞爆 Pudu 伺服器)

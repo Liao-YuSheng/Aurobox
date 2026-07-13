@@ -99,6 +99,7 @@ Pd_secret=YOUR_PUDU_API_SECRET
 Aurotek_id=YOUR_SHOP_ID
 FLASHBOT_SN=8FF055923050007
 DEFAULT_MAP_NAME=YOUR_MAP_NAME
+HOME_POINT_NAME=閃閃充電
 ```
 
 4. 啟動 API
@@ -121,7 +122,7 @@ python run.py --debug
 - `POST /api/doors/<door_number>/load`
   - 將指定 `package_id` 標記到本地艙門狀態（`full`）。
 - `POST /api/robot/dispatch`
-  - 指示機器人前往指定點位。
+  - 指示機器人前往指定點位（由外部傳入 `point`；相容舊欄位 `unit`）。
 - `POST /api/packages/<package_id>/show-qr`
   - 命令機器人顯示 QR 畫面（`call_mode=QR_CODE`）。
 - `POST /api/packages/<package_id>/cancel`

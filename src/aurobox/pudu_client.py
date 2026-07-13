@@ -315,3 +315,19 @@ class PuduApiClient:
         except Exception as e:
             self._log_robot_instruction_error("control_doors", payload, e)
             raise
+
+    def custom_content(self, payload: dict) -> dict:
+        """
+        Custom content display API (for screen/display customization).
+        Directly forwards a prebuilt payload to the custom_content endpoint.
+        """
+        try:
+            result = self._post(
+                "/pudu-entry/open-platform-service/v1/custom_content",
+                payload,
+            )
+            self._log_robot_instruction("custom_content", payload, result)
+            return result
+        except Exception as e:
+            self._log_robot_instruction_error("custom_content", payload, e)
+            raise

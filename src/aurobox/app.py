@@ -33,7 +33,7 @@ def ensure_default_doors(app: Flask) -> None:
                 package_id=None,
             )
         )
-
+    
     doors = Door.query.filter(
         Door.sn == sn,
         Door.door_number.in_(DEFAULT_DOOR_NUMBERS),
@@ -44,6 +44,7 @@ def ensure_default_doors(app: Flask) -> None:
 
     if db.session.new or db.session.dirty:
         db.session.commit()
+    
 
 def create_app(config=None):
     """Create and configure Flask app."""
@@ -64,7 +65,9 @@ def create_app(config=None):
     app.config['SHOP_ID'] = app_config.get('SHOP_ID')
     app.config['ROBOT_SN'] = app_config.get('DEFAULT_SN')
     app.config['DEFAULT_MAP_NAME'] = app_config.get('DEFAULT_MAP_NAME')
-    
+    app.config['HOME_POINT_NAME'] = app_config.get('HOME_POINT_NAME')
+    app.config['CENTRAL_API_BASE_URL'] = app_config.get('CENTRAL_API_BASE_URL')
+
     # 初始化資料庫
     db.init_app(app)
     
