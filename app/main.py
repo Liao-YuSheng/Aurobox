@@ -3,6 +3,7 @@ LINE 後端 - 主程式入口
 """
 from datetime import datetime
 from typing import Optional
+import requests
 
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.responses import PlainTextResponse, HTMLResponse
@@ -177,9 +178,14 @@ def handle_postback(data: str, reply_token: str, triggered_by: str):
             reply_text(reply_token, "好的，您可以之後透過選單「我的包裹」隨時回來取貨")
 
         elif action == "PICKUP_DONE":
+            if package.status != "arrived":
+                db.close()
+                reply_text(reply_token, "這筆包裹已經處理過了")
+                return
             db.close()
-            import requests as _requests
-            _requests.post(f"http://localhost:8000/packages/{package_id}/complete")
+            result = complete_pickup(package_id)
+            if not result["ok"]:
+                reply_text(reply_token, f"取貨確認失敗：{result['detail']}")
             return
 
         elif action == "CANCEL_PICKUP":
@@ -211,6 +217,12 @@ class CreatePackageRequest(BaseModel):
     unit: str
     recipient_name: Optional[str] = None
 
+class ConfirmDispatchRequest(BaseModel):
+    door_id: Optional[str] = None
+
+class PickupVerifyRequest(BaseModel):
+    scanned_content: Optional[str] = None
+
 
 @app.post("/packages")
 async def create_package(payload: CreatePackageRequest, db: Session = Depends(get_db)):
@@ -237,7 +249,7 @@ async def create_package(payload: CreatePackageRequest, db: Session = Depends(ge
     db.refresh(package)
 
     for binding in targets:
-        db.add(PackageRecipient(package_id=package.id, line_user_id=binding.line_user_id))
+        db.add(PackageRecipient(package_id=package.id, line_user_id=binding.line_user_id, unit=payload.unit))
     db.commit()
 
     for binding in targets:
@@ -248,7 +260,7 @@ async def create_package(payload: CreatePackageRequest, db: Session = Depends(ge
 # ========== 階段3.4 管理員確認出發（放貨+派工合併） ==========
 
 @app.post("/packages/{package_id}/stored")
-async def confirm_dispatch(package_id: str, db: Session = Depends(get_db)):
+async def confirm_dispatch(package_id: str, payload: ConfirmDispatchRequest = None, db: Session = Depends(get_db)):
     package = db.query(Package).filter(Package.id == package_id).first()
     if not package:
         raise HTTPException(status_code=404, detail="找不到這筆包裹")
@@ -260,13 +272,23 @@ async def confirm_dispatch(package_id: str, db: Session = Depends(get_db)):
         )
 
     package.status = "delivering"
+    if payload and payload.door_id:
+        package.door_id = payload.door_id
     db.commit()
+
+    try:
+        requests.post(
+            f"{settings.ROBOT_API_BASE_URL}/api/robot/dispatch",
+            json={"package_id": package_id, "destination": package.unit},
+            timeout=5,
+        )
+    except requests.exceptions.RequestException as e:
+        print(f"[錯誤] 呼叫機器人派工失敗: {e}")
 
     for line_user_id in get_recipients(db, package_id):
         push_status_update(line_user_id, "機器人已出發，包裹正在配送中，請稍候")
 
     return {"status": "ok", "package_id": str(package.id), "new_status": package.status}
-
 
 # ========== 階段3.5 機器人抵達（暫時用手動呼叫模擬） ==========
 
@@ -286,15 +308,26 @@ async def robot_arrived(package_id: str, db: Session = Depends(get_db)):
     package.arrived_at = datetime.utcnow()
     db.commit()
 
+    try:
+        requests.post(
+            f"{settings.ROBOT_API_BASE_URL}/show-qr",
+            json={"package_id": package_id, "text": "請掃描 QR Code 取件"},
+            timeout=5,
+        )
+    except requests.exceptions.RequestException as e:
+        print(f"[錯誤] 呼叫機器人顯示QR Code失敗: {e}")
+
     for line_user_id in get_recipients(db, package_id):
         push_arrived_notification(line_user_id, str(package.id))
 
     return {"status": "ok", "package_id": str(package.id), "new_status": package.status}
 
-
-@app.post("/packages/{package_id}/complete")
-async def pickup_complete(package_id: str, db: Session = Depends(get_db)):
-    """用戶按下取貨完成，機器人關門返航"""
+@app.post("/packages/{package_id}/pickup-complete")
+async def pickup_verify(package_id: str, payload: PickupVerifyRequest = None, db: Session = Depends(get_db)):
+    """
+    掃碼驗證：住戶掃描機器人螢幕上的QR Code（內容為package_id本身），
+    比對通過後，通知機器人開門。
+    """
     package = db.query(Package).filter(Package.id == package_id).first()
     if not package:
         raise HTTPException(status_code=404, detail="找不到這筆包裹")
@@ -302,17 +335,69 @@ async def pickup_complete(package_id: str, db: Session = Depends(get_db)):
     if package.status != "arrived":
         raise HTTPException(
             status_code=400,
-            detail=f"這筆包裹目前狀態是 {package.status}，不是可以完成取貨的狀態",
+            detail=f"這筆包裹目前狀態是 {package.status}，不是等待取貨的狀態",
         )
 
-    package.status = "completed"
-    db.commit()
+    scanned = payload.scanned_content if payload else None
+    if not scanned or scanned != package_id:
+        raise HTTPException(status_code=403, detail="取貨碼驗證失敗")
+
+    try:
+        requests.post(
+            f"{settings.ROBOT_API_BASE_URL}/open-door",
+            json={"package_id": package_id},
+            timeout=5,
+        )
+    except requests.exceptions.RequestException as e:
+        print(f"[錯誤] 呼叫機器人開門失敗: {e}")
 
     for line_user_id in get_recipients(db, package_id):
-        push_status_update(line_user_id, "取貨完成，感謝使用！")
+        push_pickup_complete_button(line_user_id, str(package.id))
 
-    return {"status": "ok", "package_id": str(package.id), "new_status": package.status}
+    return {"status": "ok", "message": "驗證通過，艙門已開啟"}
 
+def complete_pickup(package_id: str) -> dict:
+    """
+    真正的業務邏輯：把包裹標記完成、通知機器人關門返航、推播通知。
+    不依賴FastAPI路由，可以被 /docs 的API呼叫，也可以被 handle_postback 直接呼叫。
+    回傳一個dict，裡面標明成功與否，呼叫的地方自己決定怎麼處理。
+    """
+    db = SessionLocal()
+    try:
+        package = db.query(Package).filter(Package.id == package_id).first()
+        if not package:
+            return {"ok": False, "detail": "找不到這筆包裹"}
+
+        if package.status != "arrived":
+            return {"ok": False, "detail": f"這筆包裹目前狀態是 {package.status}，不是可以完成取貨的狀態"}
+
+        package.status = "completed"
+        db.commit()
+
+        try:
+            requests.post(
+                f"{settings.ROBOT_API_BASE_URL}/complete",
+                json={"package_id": package_id},
+                timeout=5,
+            )
+        except requests.exceptions.RequestException as e:
+            print(f"[錯誤] 呼叫機器人關門返航失敗: {e}")
+
+        for line_user_id in get_recipients(db, package_id):
+            push_status_update(line_user_id, "取貨完成，感謝使用！")
+
+        return {"ok": True, "package_id": package_id, "new_status": "completed"}
+    finally:
+        db.close()
+
+
+@app.post("packages/{package_id}/complete")
+async def pickup_complete(package_id: str):
+    """API路由，給/docs測試或未來Dashboard呼叫用，內部直接轉呼叫上面的邏輯"""
+    result = complete_pickup(package_id)
+    if not result["ok"]:
+        raise HTTPException(status_code=400, detail=result["detail"])
+    return {"status": "ok", "package_id": result["package_id"], "new_status": result["new_status"]}
 
 # ========== 階段3.7 逾時自動退回 ==========
 
@@ -331,7 +416,7 @@ def check_pickup_timeout():
         for package in overdue_packages:
             package.status = "returned_timeout"
             for line_user_id in get_recipients(db, str(package.id)):
-                push_status_update(line_user_id, "⏰ 已逾時未取，包裹已退回管理室")
+                push_status_update(line_user_id, "逾時未取，包裹將退回管理室")
             print(f"[逾時自動退回] package_id={package.id}")
         db.commit()
     finally:
@@ -446,30 +531,5 @@ LIFF_SCAN_HTML = """
 </html>
 """
 
-class PickupVerifyRequest(BaseModel):
-    scanned_content: Optional[str] = None
 
 
-@app.post("/packages/{package_id}/pickup-complete")
-async def pickup_verify(package_id: str, payload: PickupVerifyRequest = None, db: Session = Depends(get_db)):
-    """
-    掃碼驗證通過、開門這一步。
-    目前簡化：先不做真正的QR Code比對，等機器人模組完成後再補上驗證邏輯（見階段3.6.1）。
-    """
-    package = db.query(Package).filter(Package.id == package_id).first()
-    if not package:
-        raise HTTPException(status_code=404, detail="找不到這筆包裹")
-
-    if package.status != "arrived":
-        raise HTTPException(
-            status_code=400,
-            detail=f"這筆包裹目前狀態是 {package.status}，不是等待取貨的狀態",
-        )
-
-    # TODO(階段3.6.1): 這裡之後要驗證 payload.scanned_content 是否合法、有沒有過期
-    print(f"[掃碼內容] package_id={package_id}, scanned_content={payload.scanned_content if payload else None}")
-
-    for line_user_id in get_recipients(db, package_id):
-        push_pickup_complete_button(line_user_id, str(package.id))
-
-    return {"status": "ok", "message": "驗證通過，艙門已開啟"}

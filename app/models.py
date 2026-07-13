@@ -39,4 +39,5 @@ class PackageRecipient(Base):
     __tablename__ = "package_recipients"
 
     package_id = Column(UUID(as_uuid=True), primary_key=True)
+    unit = Column(String(50), nullable=False)                  # 門牌
     line_user_id = Column(String(100), primary_key=True)
