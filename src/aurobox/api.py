@@ -333,10 +333,8 @@ def return_packages_to_home():
         home_point = current_app.config.get('HOME_POINT_NAME')
         payload = build_custom_call_payload(sn=sn, point=home_point)
         controller.custom_call2(payload=payload)
-        
-        # 記錄機器人目標點位 (給 Dashboard 用)
         set_robot_target_point(sn, home_point)
-
+        
         # 2. 啟動背景執行緒去等機器人抵達並開門
         app = current_app._get_current_object()
         thread = threading.Thread(
