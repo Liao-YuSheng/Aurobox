@@ -71,7 +71,7 @@ class TaskLog(Base):
     event_type = Column(String(50), nullable=False)
     # created / rejected / rejected_at_door / door_assigned / door_assign_failed / dispatched / dispatch_failed
     # / arrived / pickup_opened / pickup_open_failed / completed / complete_failed
-    # / returned_timeout / returned / clear_qr_failed / returned_and_opened / return_open_failed
+    # / returned_timeout / returned / cancel_task_failed / returned_and_opened / return_failed
     # / door_closed / close_door_failed
     level = Column(String(10), nullable=False, default="info")  # info / warning / error
     detail = Column(String(500), nullable=True)

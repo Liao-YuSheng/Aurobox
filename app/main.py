@@ -334,23 +334,22 @@ def handle_postback(data: str, reply_token: str, triggered_by: str):
                             f"{triggered_name} 已拒收，包裹將由機器人送回管理室",
                         )
 
-                # TODO(待確認路徑): 以下兩支機器人API的實際路徑還沒跟機器人服務那邊核對過，
-                # 目前是先照現有其他呼叫的命名慣例猜的，跟show-qr一樣有可能是錯的、打了會404。
-                # 確認正確路徑之前，這兩支呼叫失敗只會記log，不會擋住上面的狀態更新跟使用者通知。
-
-                # 機器人動作1：自動消除機器人螢幕上顯示的QR Code
+                # 機器人動作1：關門 + 關閉任務畫面（包裹此時還在艙門內，機器人還沒開始移動）
                 ok, resp, error = call_robot_api(
-                    "POST", f"/api/packages/{package_id}/clear-qr", retries=1
+                    "POST", f"/api/packages/{package_id}/cancel", retries=1
                 )
                 if not ok:
-                    log_event(db, "clear_qr_failed", detail=error, package_id=package.id, level="error")
+                    log_event(db, "cancel_task_failed", detail=error, package_id=package.id, level="error")
 
-                # 機器人動作2：機器人返回管理室、並開啟艙門讓管理員可以直接取出包裹
+                import time
+                time.sleep(10)
+
+                # 機器人動作2：觸發機器人真正把包裹送回管理室，抵達後機器人會自動釋放（開啟）艙門
                 ok, resp, error = call_robot_api(
-                    "POST", f"/api/packages/{package_id}/return-and-open", retries=1
+                    "POST", "/api/packages/return", json={"package_id": package_id}, retries=1
                 )
                 if not ok:
-                    log_event(db, "return_open_failed", detail=error, package_id=package.id, level="error")
+                    log_event(db, "return_failed", detail=error, package_id=package.id, level="error")
                 else:
                     log_event(db, "returned_and_opened", package_id=package.id)
             else:
@@ -779,12 +778,8 @@ async def close_door_after_reject(package_id: str, db: Session = Depends(get_db)
     if package.door_closed_at is not None:
         raise HTTPException(status_code=400, detail="這筆包裹的艙門已經關過了")
 
-    # TODO(待確認路徑): 跟clear-qr/return-and-open一樣，這支路徑還沒跟機器人服務核對過。
-    # 也有可能不需要另外一支路徑，直接複用現有的 /api/packages/{id}/complete（關門+返航）就好，
-    # 但這裡機器人已經在管理室了，語意上比較像「只關門」，先開一支獨立路徑，之後如果確認
-    # 其實該共用/complete，再把這裡改掉即可。
     ok, resp, error = call_robot_api(
-        "POST", f"/api/packages/{package_id}/close", retries=1
+        "POST", "/api/doors/return-complete", json={"package_id": package_id, "door_id": package.door_id}, retries=1
     )
     if not ok:
         log_event(db, "close_door_failed", detail=error, package_id=package.id, level="error")
@@ -921,7 +916,11 @@ ADMIN_DASHBOARD_HTML = """
   .status-arrived { background: #d4edda; color: #155724; }
   .status-completed { background: #e2e3e5; color: #383d41; }
   .status-voided { background: #f8d7da; color: #721c24; }
-  .status-rejected_at_door { background: #f8d7da; color: #721c24; }
+  .status-rejected_at_door { background: #dc3545; color: white; font-weight: bold; }
+  .reject-alert { background: #dc3545; color: white; border-radius: 8px; padding: 14px 16px;
+    margin-bottom: 20px; font-size: 14px; box-shadow: 0 1px 4px rgba(0,0,0,0.2); }
+  .reject-alert b { display: block; font-size: 15px; margin-bottom: 6px; }
+  .reject-alert ul { margin: 0; padding-left: 20px; }
   #createMsg { margin-top: 8px; font-size: 14px; }
   .robot-info { display: flex; gap: 24px; flex-wrap: wrap; margin-bottom: 16px; }
   .robot-info div { font-size: 14px; text-align: center; }
@@ -971,6 +970,8 @@ ADMIN_DASHBOARD_HTML = """
   </div>
   <div id="doorInfo" class="doors"></div>
 </div>
+
+<div id="rejectAlert" class="reject-alert" style="display:none;"></div>
 
 <div class="card">
   <div class="card-header">
@@ -1052,13 +1053,16 @@ const STATUS_LABEL = {
   pending: '待處理', pickup_now: '待派送',
   delivering: '配送中', arrived: '已抵達', completed: '已完成',
   returned_cancelled: '已退回（取消）', returned_timeout: '已退回（逾時）',
-  voided: '作廢（不收）', rejected_at_door: '作廢（拒收）',
+  voided: '不收（作廢）', rejected_at_door: '拒收（作廢）',
 };
 
 async function loadPackages() {
   const resp = await fetch('/admin/packages');
   const packages = await resp.json();
   packagesById = Object.fromEntries(packages.map(p => [p.id, p]));
+
+  renderRejectAlert(packages);
+
   const tbody = document.getElementById('packageTableBody');
   if (packages.length === 0) {
     tbody.innerHTML = '<tr><td colspan="5">目前沒有包裹</td></tr>';
@@ -1079,6 +1083,26 @@ async function loadPackages() {
       <td>${door}</td><td>${createdAt}</td><td>${action}</td>
     </tr>`;
   }).join('');
+}
+
+function renderRejectAlert(packages) {
+  const alertEl = document.getElementById('rejectAlert');
+  // 住戶已拒收、機器人已送回，但管理員還沒按「關門」確認取出包裹的
+  const pending = packages.filter(p => p.status === 'rejected_at_door' && !p.door_closed_at);
+
+  if (pending.length === 0) {
+    alertEl.style.display = 'none';
+    alertEl.innerHTML = '';
+    return;
+  }
+
+  alertEl.style.display = 'block';
+  alertEl.innerHTML = `
+    <b>⚠️ 有 ${pending.length} 筆包裹被拒收，機器人已送回管理室，請盡快取出包裹並按「關門」</b>
+    <ul>
+      ${pending.map(p => `<li>門牌：${p.unit}（艙門：${p.door_id || '未知'}）</li>`).join('')}
+    </ul>
+  `;
 }
 
 async function dispatchPackage(packageId) {
