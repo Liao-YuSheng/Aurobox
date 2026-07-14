@@ -87,3 +87,36 @@ def _poll_notify_display_qr(
         if not callback_base_url:
             print("[系統] CENTRAL_API_BASE_URL 未設定，略過抵達通知", flush=True)
             return
+        
+def _return_home_and_open_doors(
+    app,
+    controller,
+    sn: str,
+    door_numbers: list,
+    timeout_seconds: int = 3000,
+    poll_interval: int = 5,
+):
+    """背景執行緒：輪詢機器人直到抵達管理室，然後打開有退件的艙門。"""
+    with app.app_context():
+        print(f"[系統] 開始輪詢機器人是否抵達管理室 (準備開啟退件艙門: {door_numbers})", flush=True)
+        
+        arrived = controller.wait_until_arrived(
+            sn=sn,
+            timeout_seconds=timeout_seconds,
+            poll_interval=poll_interval,
+        )
+        
+        if not arrived:
+            print(f"[系統] 輪詢超時，機器人未能在預期時間內抵達管理室", flush=True)
+            return
+
+        # 確定抵達後，才呼叫硬體開門
+        if door_numbers:
+            print(f"[系統] 機器人已抵達管理室，準備開啟退件艙門: {door_numbers}", flush=True)
+            for door_number in door_numbers:
+                try:
+                    controller.control_doors(sn=sn, door_number=door_number, operation=True)
+                except Exception as e:
+                    print(f"[系統] ⚠️ 開門失敗 (艙門 {door_number}): {e}", flush=True)
+        else:
+            print(f"[系統] 機器人已抵達管理室，空車無退件需開啟。", flush=True)

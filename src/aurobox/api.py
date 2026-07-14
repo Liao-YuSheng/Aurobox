@@ -7,7 +7,7 @@ from .models import Door, DoorStatus, RobotState
 
 from .utils import build_custom_call_payload
 from .services import get_controller, set_robot_target_point, check_and_return_home_if_empty
-from .tasks import _return_for_assign, _poll_notify_display_qr
+from .tasks import _return_for_assign, _poll_notify_display_qr, _return_home_and_open_doors
 
 api_bp = Blueprint('api', __name__)
 
@@ -273,13 +273,13 @@ def package_complete(package_id):
         return jsonify({'error': str(e)}), 500
 
 # ==========================================================
-# 5. 取消或逾時 (Cancel / Timeout)
+# 5. 住戶拒收 / 取消或逾時 (Cancel / Reject)
 # ==========================================================
 @api_bp.route('/packages/<package_id>/cancel', methods=['POST'])
 def package_cancel(package_id):
     """
-    中央大腦通知：包裹已被取消或逾時。
-    【本機動作】：強制中斷當前任務(關門、關閉QR畫面)，但保留包裹(DoorStatus.FULL)
+    中央大腦通知：住戶拒收、取消或逾時。
+    【本機動作】：確保關門 -> 消除 QR Code 畫面 -> 保留包裹 (FULL)
     """
     sn = current_app.config.get('ROBOT_SN')
     door = Door.query.filter_by(package_id=package_id, sn=sn).first()
@@ -290,60 +290,113 @@ def package_cancel(package_id):
     controller = get_controller()
 
     try:
-        # 1. 物理防呆：確保該艙門是關上的 (避免取消瞬間門還開著)
+        # 1. 確保艙門是關上的
         controller.control_doors(sn=sn, door_number=door.door_number, operation=False)
         
-        # 2. 強制中斷螢幕畫面：取消 QR Code 顯示，恢復預設狀態
+        # 2. 消除機器人螢幕的 QR Code 任務畫面
         if door.task_id:
             payload_complete = {"task_id": door.task_id}
             controller.client.custom_complete(payload_complete)
+            
+            # 畫面消除後，這個 task_id 就失效了，可以清掉
+            door.task_id = None 
 
-        # 3. 保持艙門狀態為 FULL (因為貨物還在裡面)
+        # 3. 狀態保持 FULL，包裹依然在車上
+        door.status = DoorStatus.FULL
+        db.session.commit()
+        
         return jsonify({
             'status': 'success', 
-            'message': f'Task cancelled. Door {door.door_number} closed and UI reset. Package is still inside.',
+            'message': f'Package {package_id} rejected. Door {door.door_number} closed and UI reset. Ready for next dispatch.',
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# ==========================================================
+# 6. 管理室：退件返航與開門 (Return & Open)
+# ========================================================== 
+@api_bp.route('/packages/return', methods=['POST'])
+def return_packages_to_home():
+    """
+    中央大腦通知：無其他包裹需配送，全部退回。
+    【本機動作】：呼叫機器人回到管理室 -> 背景等待抵達 -> 將狀態為 FULL 的艙門打開。
+    """
+    sn = current_app.config.get('ROBOT_SN')
+    controller = get_controller()
+
+    # 找出所有裡面還有退件(FULL)的艙門
+    full_doors = Door.query.filter_by(sn=sn, status=DoorStatus.FULL).all()
+    full_door_numbers = [door.door_number for door in full_doors]
+
+    try:
+        # 1. 呼叫機器人前往管理室
+        home_point = current_app.config.get('HOME_POINT_NAME')
+        payload = build_custom_call_payload(sn=sn, point=home_point)
+        controller.custom_call2(payload=payload)
+        
+        # 記錄機器人目標點位 (給 Dashboard 用)
+        set_robot_target_point(sn, home_point)
+
+        # 2. 啟動背景執行緒去等機器人抵達並開門
+        app = current_app._get_current_object()
+        thread = threading.Thread(
+            target=_return_home_and_open_doors,
+            args=(app, controller, sn, full_door_numbers),
+            daemon=True,
+        )
+        thread.start()
+
+        return jsonify({
+            'status': 'success', 
+            'message': f'Robot returning to {home_point}. Doors {full_door_numbers} will open upon arrival.',
+            'returning_home': True
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+# ==========================================================
+# 7. 管理室：確認取出並關閉艙門 (Return Complete)
+# ==========================================================
+@api_bp.route('/doors/return-complete', methods=['POST'])
+def complete_returned_doors():
+    """
+    中央大腦通知：管理員已將退回的包裹全數取出。
+    【本機動作】：關閉所有原本是 FULL 的艙門，並將資料庫狀態清空為 EMPTY。
+    """
+    sn = current_app.config.get('ROBOT_SN')
+    full_doors = Door.query.filter_by(sn=sn, status=DoorStatus.FULL).all()
+    
+    if not full_doors:
+        return jsonify({'status': 'success', 'message': 'No doors to close.', 'closed_doors': []})
+
+    controller = get_controller()
+    closed_doors = []
+
+    try:
+        for door in full_doors:
+            # 1. 物理關門
+            controller.control_doors(sn=sn, door_number=door.door_number, operation=False)
+            
+            # 2. 清空資料庫狀態，釋放資源
+            door.status = DoorStatus.EMPTY
+            door.package_id = None
+            door.task_id = None
+            closed_doors.append(door.door_number)
+            
+        db.session.commit()
+        
+        return jsonify({
+            'status': 'success',
+            'message': 'All returned packages removed. Doors closed and freed.',
+            'closed_doors': closed_doors
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
     
 # ==========================================================
-# 6. 機器人退回並清空 (Return)
-# ==========================================================
-@api_bp.route('/packages/return', methods=['POST'])
-def package_return(package_id):
-    """
-    中央大腦通知：因取消或逾時而退回的包裹，管理員已經在管理室實體取出了。
-    【本機動作】：退回的包裹被拿走後，艙門物理上才真正清空，此時釋放艙門。
-    """
-    sn = current_app.config.get('ROBOT_SN')
-    door = Door.query.filter_by(package_id=package_id, sn=sn).first()
-    controller = get_controller()
-    # . 返回管理室
-    home_point = current_app.config.get('HOME_POINT_NAME')
-    payload = build_custom_call_payload(sn=sn, point=home_point)
-    controller.custom_call2(payload=payload)
-    controller = get_controller()
-
-    if not door:
-        return jsonify({'error': 'Package not found in any door'}), 404
-    
-    if door.status == DoorStatus.FULL:
-        # 1. 呼叫普渡 API：關門
-        controller.control_doors(sn=sn, door_number=door.door_number, operation=False)
-        
-    # 物理狀態現在才是真正的 EMPTY
-    door.status = DoorStatus.EMPTY
-    door.package_id = None
-    door.task_id = None
-    db.session.commit()
-    
-    return jsonify({
-        'status': 'success',
-        'message': f'Returned package removed by admin. Door {door.door_number} is now freed.'
-    })
-
-# ==========================================================
-# 7. Dashboard 監控 API (直接查實體機器人與艙門資料庫)
+# 8. Dashboard 監控 API (直接查實體機器人與艙門資料庫)
 # ==========================================================
 @api_bp.route('/dashboard/status', methods=['GET'])
 def get_dashboard_status():

@@ -98,6 +98,10 @@ CENTRAL_API_BASE_URL=https://your-central-api.example.com
 python run.py --debug
 ```
 
+```bash
+python3 run.py 2>&1 | tee -a aurobox.log
+```
+
 預設監聽：`http://0.0.0.0:5000`
 
 ## API 一覽（依目前程式）
