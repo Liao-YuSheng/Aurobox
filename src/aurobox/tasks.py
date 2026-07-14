@@ -1,4 +1,5 @@
 """Background threading tasks."""
+import time
 import requests as http_requests
 
 def _return_for_assign(
@@ -42,6 +43,8 @@ def _poll_notify_display_qr(
 ) -> None:
     """背景執行緒：輪詢機器人狀態直到抵達，再通知中央大腦。"""
     with app.app_context():
+        time.sleep(3)
+        
         arrived = controller.wait_until_arrived(
             sn=sn,
             timeout_seconds=timeout_seconds,
@@ -98,6 +101,8 @@ def _return_home_and_open_doors(
 ):
     """背景執行緒：輪詢機器人直到抵達管理室，然後打開有退件的艙門。"""
     with app.app_context():
+        time.sleep(3)
+        
         print(f"[系統] 開始輪詢機器人是否抵達管理室 (準備開啟退件艙門: {door_numbers})", flush=True)
         
         arrived = controller.wait_until_arrived(
