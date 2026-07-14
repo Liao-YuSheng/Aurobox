@@ -285,25 +285,32 @@ def package_cancel(package_id):
     door = Door.query.filter_by(package_id=package_id, sn=sn).first()
 
     if not door:
+        print(f"[系統] 找不到對應的包裹 {package_id}", flush=True)
         return jsonify({'error': 'Package not found in any door'}), 404
         
     controller = get_controller()
 
     try:
         # 1. 確保艙門是關上的
+        print(f"[系統] 確保艙門 {door.door_number} 已關閉", flush=True)
         controller.control_doors(sn=sn, door_number=door.door_number, operation=False)
         
         # 2. 消除機器人螢幕的 QR Code 任務畫面
         if door.task_id:
+            print(f"[系統] 準備消除機器人螢幕的 QR Code (Task ID: {door.task_id})", flush=True)
             payload_complete = {"task_id": door.task_id}
             controller.client.custom_complete(payload_complete)
+            print(f"[系統] 成功消除 QR Code 畫面", flush=True)
             
             # 畫面消除後，這個 task_id 就失效了，可以清掉
             door.task_id = None 
+        else:
+            print(f"[系統] 沒有發現綁定的 Task ID，略過畫面消除", flush=True)
 
         # 3. 狀態保持 FULL，包裹依然在車上
         door.status = DoorStatus.FULL
         db.session.commit()
+        print(f"[系統] 艙門 {door.door_number} 狀態維持 FULL，準備等待後續退回流程", flush=True)
         
         return jsonify({
             'status': 'success', 
@@ -328,10 +335,13 @@ def return_packages_to_home():
     full_doors = Door.query.filter_by(sn=sn, status=DoorStatus.FULL).all()
     full_door_numbers = [door.door_number for door in full_doors]
 
+    print(f"[系統] 偵測到需要退回的艙門有: {full_door_numbers}", flush=True)
+
     try:
         # 1. 呼叫機器人前往管理室
         home_point = current_app.config.get('HOME_POINT_NAME')
         payload = build_custom_call_payload(sn=sn, point=home_point)
+        print(f"[系統] 呼叫機器人前往 {home_point}...", flush=True)
         controller.custom_call2(payload=payload)
         set_robot_target_point(sn, home_point)
         
@@ -343,6 +353,7 @@ def return_packages_to_home():
             daemon=True,
         )
         thread.start()
+        print(f"[系統] 已啟動背景執行緒，等待抵達後自動開啟退件艙門", flush=True)
 
         return jsonify({
             'status': 'success', 
@@ -367,6 +378,7 @@ def complete_returned_doors():
     full_doors = Door.query.filter_by(sn=sn, status=DoorStatus.FULL).all()
     
     if not full_doors:
+        print(f"[系統] 沒有發現任何 FULL 狀態的艙門需要關閉", flush=True)
         return jsonify({'status': 'success', 'message': 'No doors to close.', 'closed_doors': []})
 
     controller = get_controller()
@@ -375,6 +387,7 @@ def complete_returned_doors():
     try:
         for door in full_doors:
             # 1. 物理關門
+            print(f"[系統] 正在關閉退件艙門 {door.door_number}...", flush=True)
             controller.control_doors(sn=sn, door_number=door.door_number, operation=False)
             
             # 2. 清空資料庫狀態，釋放資源
@@ -382,9 +395,11 @@ def complete_returned_doors():
             door.package_id = None
             door.task_id = None
             closed_doors.append(door.door_number)
+            print(f"[系統] 艙門 {door.door_number} 已關閉，狀態重置為 EMPTY", flush=True)
             
         db.session.commit()
-        
+        print(f"[系統] 所有退件艙門已清空，硬體資源完全釋放", flush=True)
+
         return jsonify({
             'status': 'success',
             'message': 'All returned packages removed. Doors closed and freed.',
