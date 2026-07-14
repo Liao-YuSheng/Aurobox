@@ -1,171 +1,135 @@
-# Aurobox 實作完成報告
+# Aurobox 全目錄盤點報告
 
-**完成日期**: 2026-07-08
-**版本**: 0.1.0
-**狀態**: 核心流程已完成，可進行端到端驗證
+完成日期: 2026-07-14  
+版本: 0.2.0  
+狀態: 已完成全專案檢視與文件同步
 
-## 1. 專案概述
+## 1. 本次工作範圍
 
-Aurobox 是一套以普渡 Flashbot 為核心的送貨機器人管理系統，涵蓋包裹派送、艙門控制、機器人狀態監控、LINE webhook、Dashboard 與 CLI 操作。
+本次針對 AUROBOX 根目錄進行盤點，涵蓋：
 
-## 2. 已完成項目
+- `src/aurobox` 核心程式
+- `tests` 測試
+- `scripts` 維運工具
+- `run.py`、`pyproject.toml`、`examples.py`
+- 現有文件（`README.md`、`REPORT.md`、`REPORT_2.md`、`docs` 目錄）
 
-### 2.1 Flask + SQLAlchemy 基礎架構
+目的：將文件描述與實際程式行為對齊，並標註已知風險。
 
-- [x] Flask 應用工廠與 Blueprint 註冊
-- [x] SQLAlchemy 資料庫初始化
-- [x] SQLite 舊資料表補欄機制
-- [x] 環境變數載入與配置整合
+## 2. 程式現況總結
 
-### 2.2 資料模型
+### 2.1 核心定位
 
-- [x] `Package`
-   - 包裹狀態流程：`pending`、`later`、`pickup_now`、`delivering`、`arrived`、`completed`、`returned_cancelled`、`returned_timeout`
-   - 包含艙門、時間戳記、LINE 使用者 ID、取貨 QR token
-- [x] `Door`
-   - 艙門狀態、裝載狀態、包裹對應資訊
-- [x] `RobotStatus`
-   - `move_state`、`run_state`、`task_state`、`is_charging`、`charge_stage` 等即時欄位
-- [x] `DeliveryHistory`
-   - 完整操作歷史與 JSON details
+專案目前是「Flashbot 硬體控制 API」，不再是完整配送平台。
 
-### 2.3 包裹管理 API
+保留能力：
 
-| 方法 | 端點 | 說明 |
-|---|---|---|
-| POST | `/api/packages` | 建立新包裹 |
-| GET | `/api/packages/<id>` | 取得包裹詳情 |
-| POST | `/api/packages/<id>/response` | 住戶選擇 `pickup_now` / `later` |
-| POST | `/api/packages/<id>/stored` | 管理員放貨並指定艙門 |
-| POST | `/api/packages/<id>/departed` | 確認機器人出發 |
-| POST | `/api/packages/<id>/arrived` | 機器人抵達、建立 QR token、嘗試顯示 QR |
-| POST | `/api/packages/<id>/pickup-complete` | 掃碼後完成取貨，驗證 token |
-| POST | `/api/packages/<id>/complete` | 取貨完成後清空艙門 |
-| POST | `/api/packages/<id>/cancel` | 取消或逾時退回 |
-| POST | `/api/packages/<id>/returned` | 記錄機器人返回 |
+- Flask API 對外接口
+- Pudu Open Platform 簽章與呼叫
+- 艙門狀態最小管理（Door）
+- 機器人點位記錄（RobotState）
+- 背景輪詢（抵達判斷 / 通知中央系統）
 
-### 2.4 Dashboard 即時狀態 API
+已不存在於核心程式：
 
-- 端點：`GET /api/dashboard/events`
-- 回傳：機器人狀態、任務隊列、艙門狀態、今日歷史資料
-- 來源整合：V1 / V2 / task-state 三個 Pudu 狀態來源
-- 上游授權或 HTTP 錯誤會回傳對應狀態碼，不再全部包成 500
+- LINE webhook 路由
+- Package / DeliveryHistory 等完整業務模型
+- 舊版 manager service 流程
 
-### 2.5 LINE Webhook
+### 2.2 主要模組
 
-- 端點：`POST /webhooks/line`
-- 驗證 `X-Line-Signature`
-- 支援 `postback` 與 `message`
-- 可用於包裹狀態回寫與訊息推播
+- `app.py`: App factory、DB 初始化、預設三個艙門重置
+- `api.py`: 對外流程 API（assign/load/dispatch/complete/cancel/return/status）
+- `robot.py`: `FlashbotController` 與 V1/V2/task-state 狀態整合
+- `pudu_client.py`: HMAC 簽章、GET/POST 包裝、指令紀錄 log
+- `models.py`: `Door`、`RobotState` 與約束
+- `services.py`: Controller 取得、目標點記錄、全空返航
+- `tasks.py`: 背景輪詢抵達、通知中央系統、顯示 QR 內容
+- `cli.py`: CLI 子命令封裝
 
-### 2.6 QR Code 取貨流程
+## 3. API 現況（依實際路由）
 
-- 機器人抵達時建立 `pickup_qr_token`
-- 系統會嘗試呼叫 Pudu `call_mode=QR_CODE` 顯示取貨 QR
-- `pickup-complete` 需帶入相同 token 才會成功
-- 目前沒有另外提供 QR 圖片產生器，前端或 LINE 端可自行將 token 轉成 QR 圖片
+基礎：
 
-### 2.7 custom_call 與呼叫模式
+- `GET /`
+- `GET /healthz`
 
-- `custom_call` 預設 `call_mode` 已調整為 `CALL`
-- 只有 QR 取貨流程才明確使用 `QR_CODE`
-- `IMG` 保留作為圖片展示模式，不作為預設值
+硬體流程：
 
-### 2.8 管理員服務與背景任務
+- `POST /api/doors/assign`
+- `POST /api/doors/load`
+- `POST /api/robot/dispatch`
+- `POST /api/packages/<package_id>/pickup-complete`
+- `POST /api/packages/<package_id>/complete`
+- `POST /api/packages/<package_id>/cancel`
+- `POST /api/packages/return`
+- `POST /api/doors/return-complete`
+- `GET /api/dashboard/status`
 
-- [x] `register_package()`
-- [x] `allocate_door()`
-- [x] `call_robot_to_management()`
-- [x] `confirm_door_open()`
-- [x] `confirm_package_loaded()`
-- [x] `force_reset_all_doors()`
-- [x] `correct_door_state()`
-- [x] `get_task_queue()`
-- [x] `poll_robot_status()`
-- [x] `check_pickup_timeout()`
-- [x] `sync_door_states()`
-- [x] `handle_robot_returning()`
+## 4. 資料層現況
 
-### 2.9 CLI 與啟動
+SQLite 使用 `instance/aurobox.db`。
 
-- [x] `aurobox status`
-- [x] `aurobox position`
-- [x] `aurobox recharge`
-- [x] `aurobox map-list`
-- [x] `aurobox door-state`
-- [x] `aurobox open-map`
-- [x] `aurobox call`
-- [x] Flask 開發伺服器與 debug 模式啟動
+資料表：
 
-## 3. 目前資料流
+- `doors`: `sn`, `door_number`, `status`, `package_id`, `task_id`, `updated_at`
+- `robot_state`: `sn`, `last_point`, `updated_at`
 
-```mermaid
-flowchart TB
-	Dashboard[管理員 Dashboard] --> API[Flask API]
-	LINE[LINE Webhook] --> API
-	API --> Package[Package]
-	API --> Door[Door]
-	API --> Robot[RobotStatus]
-	API --> Manager[ManagerService]
-	API --> Tasks[TaskService]
-	Manager --> Pudu[Pudu Open Platform]
-	Tasks --> Pudu
-	Pudu --> RobotHW[Flashbot 機器人]
-```
+約束：
 
-## 4. 主要流程
+- 僅允許艙門 `H_01/H_02/H_03`
+- `status` 僅允許 `empty/assigned/full`
 
-### 4.1 派送流程
+## 5. 測試與可執行狀態
 
-1. 管理員建立包裹。
-2. 住戶選擇 `pickup_now` 或 `later`。
-3. 管理員放貨並指定艙門。
-4. 機器人前往住戶地址。
-5. 機器人抵達後生成 `pickup_qr_token`，並嘗試以 `QR_CODE` 顯示取貨 QR。
-6. 住戶掃碼後呼叫 `pickup-complete` 完成取貨。
-7. 系統清空艙門並記錄完成歷史。
+### 5.1 測試覆蓋
 
-### 4.2 逾時退回
+目前測試檔 `tests/test_pudu_client.py` 主要涵蓋：
 
-- 由 `check_pickup_timeout()` 檢查逾時未取貨訂單。
-- 逾時後狀態會轉為 `returned_timeout`，並觸發返航或退回流程。
+- 設定載入
+- 必填環境變數驗證
+- Client / Controller 初始化
 
-## 5. 重要說明
+尚未涵蓋：
 
-### 5.1 狀態整合
+- API 路由行為
+- DB 狀態轉換
+- 背景輪詢執行緒
 
-- `get_status_summary()` 是 Dashboard 與背景任務的主要狀態入口。
-- 不再直接依賴單一 `run_state` 判斷機器人動作。
+### 5.2 本次執行結果
 
-### 5.2 QR 與 webhook
+在目前工作環境中無法直接執行測試：
 
-- LINE webhook 是對外事件入口，不是前端輪詢 API。
-- QR 取貨目前採 token 驗證流程，機器人端顯示 QR 屬於 `QR_CODE` 呼叫模式。
+- `pytest` 指令不存在
+- `python -m pytest` 回報 `No module named pytest`
 
-### 5.3 custom_call
+## 6. 舊檔與現況差異
 
-- 預設模式是 `CALL`。
-- 若需要圖片、影片、QR 顯示，需顯式指定 `call_mode`。
+- `examples.py` 仍引用舊架構（如 `aurobox.manager`、`PackageStatus`），與 0.2.0 現況不一致。
 
-## 6. 環境需求
+## 7. 已知問題（需優先處理）
 
-- Python 3.10+
-- Flask 3.0+
-- SQLAlchemy 3.0+
-- requests 2.31+
-- python-dotenv 1.0+
-- cryptography 41+
+### 7.1 路由參數不一致 (正在解決)
 
-## 7. 文件與入口
+- `api.py` 中 `POST /api/packages/return` 對應函式為 `package_return(package_id)`。
+- 路由未帶 `package_id`，實際呼叫時會造成參數錯誤風險。
 
-- [README.md](./README.md): 使用與 API 說明
-- `run.py`: 應用啟動入口
-- `examples.py`: 範例腳本
+### 7.2 文件與實作不同步風險
 
-## 8. 後續可延伸項目
+- 若仍沿用舊版 API 文件（例如 `show-qr`、`returned` 路由），整合端會打錯端點。
 
-- 前端 QR 圖片直接顯示
-- LINE Flex / LIFF 取貨頁
-- 多機器人支援
-- 異步任務隊列與重試機制
+## 8. 本次文件更新成果
+
+- 已更新 `README.md`：
+  - API 清單改為實際路由
+  - 補齊當前專案結構與環境變數
+  - 新增已知問題區塊
+- 已重建 `REPORT.md`（本文件）：
+  - 以 2026-07-14 全目錄盤點結果為基準
+
+## 9. 建議下一步
+
+1. 修正 `POST /api/packages/return` 之路由與函式參數一致性。
+2. 新增 API 整合測試（至少覆蓋 assign/load/dispatch/complete/cancel）。
+3. 汰換或重寫 `examples.py`，避免誤導新開發者。
 

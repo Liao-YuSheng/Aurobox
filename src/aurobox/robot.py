@@ -201,7 +201,7 @@ class FlashbotController:
 
     def wait_until_arrived(self, sn: str | None = None, timeout_seconds: int = 300, poll_interval: int = 3) -> bool:
         """
-        輪詢監控機制：每隔 poll_interval 秒詢問一次，直到機器人抵達定點 (ARRIVE)。
+        輪詢監控機制：每隔 poll_interval 秒詢問一次，直到機器人抵達定點 (IDLE or ARRIVE)。
         """
         sn = sn or self.default_sn
         start_time = time.time()

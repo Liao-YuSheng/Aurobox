@@ -13,18 +13,18 @@ from aurobox.models import db, Door, DoorStatus
 def main():
     # 初始化 Flask 環境
     config = load_config()
-    app = create_app(config)
+    app = create_app(config, reset_db=False)
     
     with app.app_context():
         print("="*40)
-        print("🔍 正在查詢資料庫中的艙門狀態...")
+        print("正在查詢資料庫中的艙門狀態...")
         # 加上 order_by 讓輸出結果照 H_01, H_02, H_03 排序
         doors = Door.query.order_by(Door.door_number).all()
         
         if not doors:
-            print("⚠️ 警告：資料庫裡面完全沒有艙門資料！請確認 app.py 是否有正常啟動並補齊艙門。")
+            print("警告：資料庫裡面完全沒有艙門資料！請確認 app.py 是否有正常啟動並補齊艙門。")
         else:
-            print(f"📊 目前共有 {len(doors)} 個艙門：")
+            print(f"目前共有 {len(doors)} 個艙門：")
             for door in doors:
                 print(f" - 門號: {door.door_number} | 狀態: {door.status} | 綁定包裹: {door.package_id}")
                 

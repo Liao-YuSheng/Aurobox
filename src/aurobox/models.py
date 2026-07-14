@@ -33,12 +33,25 @@ class Door(db.Model):
     door_number = db.Column(db.String(10), nullable=False)  # 例如: H_01
     status = db.Column(db.String(20), nullable=False, default=DoorStatus.EMPTY.value)
     package_id = db.Column(db.String(100), nullable=True)   # 中央大腦指派的包裹 ID
+    task_id = db.Column(db.String(100), nullable=True)   # 當前機器人的任務 ID
     
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     def __repr__(self):
         return f"<Door {self.door_number} - {self.status} - Pkg: {self.package_id}>"
 
+class RobotState(db.Model):
+    """記憶機器人當前位置與狀態的資料表"""
+    __tablename__ = "robot_state"
+
+    id = db.Column(db.Integer, primary_key=True)
+    sn = db.Column(db.String(50), unique=True, nullable=False)
+    last_point = db.Column(db.String(100), nullable=True, default="管理室") 
+    
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def __repr__(self):
+        return f"<RobotState {self.sn} - Last Point: {self.last_point}>"
 
 @event.listens_for(Door, "before_delete")
 def _prevent_door_delete(mapper, connection, target):

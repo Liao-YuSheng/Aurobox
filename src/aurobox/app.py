@@ -5,9 +5,7 @@ from flask import Flask, jsonify
 from .models import db, Door, DoorStatus
 from .config import load_config
 
-
 DEFAULT_DOOR_NUMBERS = ("H_01", "H_02", "H_03")
-
 
 def ensure_default_doors(app: Flask) -> None:
     """Ensure default doors exist and reset them to empty at startup."""
@@ -45,8 +43,7 @@ def ensure_default_doors(app: Flask) -> None:
     if db.session.new or db.session.dirty:
         db.session.commit()
     
-
-def create_app(config=None):
+def create_app(config=None, reset_db=True):
     """Create and configure Flask app."""
     app = Flask(__name__)
     
@@ -74,7 +71,8 @@ def create_app(config=None):
     # 建立表單 (只會建立 Door)
     with app.app_context():
         db.create_all()
-        ensure_default_doors(app)
+        if reset_db:
+            ensure_default_doors(app)
     
     # 註冊 API 藍圖 (不再註冊 webhooks)
     from .api import api_bp

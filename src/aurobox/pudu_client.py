@@ -317,10 +317,6 @@ class PuduApiClient:
             raise
 
     def custom_content(self, payload: dict) -> dict:
-        """
-        Custom content display API (for screen/display customization).
-        Directly forwards a prebuilt payload to the custom_content endpoint.
-        """
         try:
             result = self._post(
                 "/pudu-entry/open-platform-service/v1/custom_content",
@@ -330,4 +326,16 @@ class PuduApiClient:
             return result
         except Exception as e:
             self._log_robot_instruction_error("custom_content", payload, e)
+            raise
+    
+    def custom_complete(self, payload: dict) -> dict:
+        try:
+            result = self._post(
+                "/pudu-entry/open-platform-service/v1/custom_call/complete",
+                payload,
+            )
+            self._log_robot_instruction("custom_complete", payload, result)
+            return result
+        except Exception as e:
+            self._log_robot_instruction_error("custom_complete", payload, e)
             raise
