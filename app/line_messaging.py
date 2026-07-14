@@ -12,7 +12,7 @@ configuration = Configuration(access_token=settings.LINE_CHANNEL_ACCESS_TOKEN)
 
 
 def push_arrival_notification(line_user_id: str, package_id: str, unit: str):
-    """推播到貨通知，附「取貨」「稍後再取」兩個按鈕"""
+    """推播到貨通知，附「取貨」「不收」兩個按鈕"""
     contents = {
         "type": "bubble",
         "header": {
@@ -49,8 +49,8 @@ def push_arrival_notification(line_user_id: str, package_id: str, unit: str):
                     "style": "secondary",
                     "action": {
                         "type": "postback",
-                        "label": "稍後再取",
-                        "data": f"action=LATER&package_id={package_id}",
+                        "label": "不收",
+                        "data": f"action=REJECT&package_id={package_id}",
                     },
                 },
             ],
@@ -102,7 +102,7 @@ def push_status_update(line_user_id: str, text: str):
 
 
 def push_arrived_notification(line_user_id: str, package_id: str):
-    """機器人抵達時，推播提醒+開啟掃碼+暫時無法取貨按鈕"""
+    """機器人抵達時，推播提醒+開啟掃碼+拒收按鈕"""
     contents = {
         "type": "bubble",
         "header": {
@@ -139,8 +139,8 @@ def push_arrived_notification(line_user_id: str, package_id: str):
                     "style": "secondary",
                     "action": {
                         "type": "postback",
-                        "label": "暫時無法取貨",
-                        "data": f"action=CANCEL_PICKUP&package_id={package_id}",
+                        "label": "拒收",
+                        "data": f"action=REJECT_AT_DOOR&package_id={package_id}",
                     },
                 },
             ],
@@ -197,11 +197,38 @@ def push_pickup_complete_button(line_user_id: str, package_id: str):
         )
 
 
+PACKAGE_STATUS_LABEL_ZH = {
+    "pending": "待處理，可直接按下方按鈕取貨",
+    "pickup_now": "已請求取貨，管理員準備中",
+    "delivering": "機器人配送中",
+    "arrived": "機器人已抵達，請至LINE通知點選掃碼取貨",
+}
+
+
 def reply_later_packages(reply_token: str, packages: list):
-    """回覆「稍後再取」包裹清單，每張卡片可直接按「現在取」"""
+    """
+    回覆使用者目前所有還沒結束的包裹清單（函式名稱是舊的，沿用沒改，
+    但內容不再只限"later"狀態，包含pending/pickup_now/delivering/arrived）。
+    只有還是pending（完全還沒回應到貨通知）的包裹才會附上「現在取」按鈕，
+    其他狀態已經在流程中，不應該讓使用者從這裡重新觸發一次PICKUP_NOW。
+    """
     bubbles = []
     for package in packages:
-        bubbles.append({
+        status_text = PACKAGE_STATUS_LABEL_ZH.get(package.status, package.status)
+        footer_contents = []
+        if package.status == "pending":
+            footer_contents.append({
+                "type": "button",
+                "style": "primary",
+                "color": "#06C755",
+                "action": {
+                    "type": "postback",
+                    "label": "現在取",
+                    "data": f"action=PICKUP_NOW&package_id={package.id}",
+                },
+            })
+
+        bubble = {
             "type": "bubble",
             "body": {
                 "type": "box",
@@ -209,25 +236,17 @@ def reply_later_packages(reply_token: str, packages: list):
                 "contents": [
                     {"type": "text", "text": f"📦 門牌：{package.unit}", "wrap": True},
                     {"type": "text", "text": f"登記時間：{package.created_at.strftime('%m/%d %H:%M')}", "size": "sm", "color": "#888888"},
+                    {"type": "text", "text": status_text, "size": "sm", "color": "#029C4D", "wrap": True, "margin": "md"},
                 ],
             },
-            "footer": {
+        }
+        if footer_contents:
+            bubble["footer"] = {
                 "type": "box",
                 "layout": "vertical",
-                "contents": [
-                    {
-                        "type": "button",
-                        "style": "primary",
-                        "color": "#06C755",
-                        "action": {
-                            "type": "postback",
-                            "label": "現在取",
-                            "data": f"action=PICKUP_NOW&package_id={package.id}",
-                        },
-                    }
-                ],
-            },
-        })
+                "contents": footer_contents,
+            }
+        bubbles.append(bubble)
 
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
