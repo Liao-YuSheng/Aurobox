@@ -12,7 +12,7 @@ from .tasks import _return_for_assign, _poll_notify_display_qr, _return_home_and
 api_bp = Blueprint('api', __name__)
 
 # ==========================================================
-# 0. 分派空艙門並為管理員開門 (Assign & Open)
+# 0. 分派空艙門並為管理員開門 (Assign & Open) -- 多包裹維持單一艙門分派
 # ==========================================================
 @api_bp.route('/doors/assign', methods=['POST'])
 def assign_door_for_package():
@@ -77,56 +77,56 @@ def assign_door_for_package():
         return jsonify({'error': str(e)}), 500
 
 # ==========================================================
-# 1. 管理員將包裹放入艙門並確認 (Load)
+# 1. 管理員將包裹放入艙門並確認 (Load) -- 多包裹直接關閉所有艙門
 # ==========================================================
 @api_bp.route('/doors/load', methods=['POST'])
 def load_package_to_door():
     """
-    中央大腦通知：管理員已將包裹放入指定艙門。
-    【本機動作】：依 package_id 找到對應艙門 -> 關閉艙門 -> 狀態改為 FULL。
+    中央大腦通知：管理員已將包裹全數放入艙門，準備出發。
+    【本機動作】：找出所有狀態為 ASSIGNED 的艙門 -> 關閉艙門 -> 狀態改為 FULL。
     """
-    
-    data = request.get_json()
-    package_id = data.get('id')
-    """
-    print("\n" + "="*40, flush=True)
-    print(f"包裹 ID : {package_id}", flush=True)
-    print("="*40 + "\n", flush=True)
-    """
-
-    if not package_id:
-        return jsonify({'error': 'package_id is required'}), 400
-
     sn = current_app.config.get('ROBOT_SN')
-    door = Door.query.filter_by(package_id=package_id, sn=sn).first()
+    
+    # 1. 尋找本機所有狀態為 ASSIGNED 的艙門
+    assigned_doors = Door.query.filter_by(sn=sn, status=DoorStatus.ASSIGNED).all()
 
-    if not door:
-        return jsonify({'error': f'No door found for package_id {package_id}'}), 404
-
-    # 確保該門有被指派
-    if door.status != DoorStatus.ASSIGNED:
-        return jsonify({'error': f'Door {door.door_number} is not in ASSIGNED state'}), 400
+    if not assigned_doors:
+        return jsonify({'error': 'No doors in ASSIGNED state to load'}), 400
 
     controller = get_controller()
+    loaded_doors_info = []
 
     try:
-        # 1. 呼叫普渡 API：關門
-        controller.control_doors(sn=sn, door_number=door.door_number, operation=False)
+        # 2. 針對每一個 ASSIGNED 艙門進行關門與狀態更新
+        for door in assigned_doors:
+            # 呼叫普渡 API：關門 (operation=False)
+            controller.control_doors(sn=sn, door_number=door.door_number, operation=False)
 
-        # 2. 更新資料庫狀態為 FULL
-        door.status = DoorStatus.FULL
+            # 更新資料庫狀態為 FULL
+            door.status = DoorStatus.FULL
+            
+            # 記錄起來準備回傳給中控端
+            loaded_doors_info.append({
+                'door_number': door.door_number,
+                'package_id': door.package_id
+            })
+
+        # 3. 統一 Commit 寫入資料庫
         db.session.commit()
 
         return jsonify({
             'status': 'success',
-            'message': f'Door {door.door_number} closed and marked as FULL with {door.package_id}',
-            'door_number': door.door_number,
+            'message': f'Successfully closed and loaded {len(assigned_doors)} doors.',
+            'loaded_doors': loaded_doors_info
         })
+        
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
     
 # ==========================================================
-# 2. 指揮機器人移動 (Dispatch)
+# 2. 指揮機器人移動 (Dispatch)  -- 多包裹維持單一包裹配送
 # ==========================================================
 @api_bp.route('/robot/dispatch', methods=['POST'])
 def robot_dispatch():

@@ -13,6 +13,8 @@ def _return_for_assign(
 ):
     """背景執行緒：輪詢機器人直到抵達管理室，然後才把分配的艙門打開。"""
     with app.app_context():
+        time.sleep(3)
+        
         print(f"[系統] 開始輪詢機器人是否抵達管理室 (準備開啟艙門 {door_number})", flush=True)
         
         arrived = controller.wait_until_arrived(
