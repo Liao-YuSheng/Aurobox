@@ -31,7 +31,7 @@ class Package(Base):
     line_user_id = Column(String(100), nullable=False)         # 收件人 LINE User ID
     status = Column(String(30), nullable=False, default="pending")
     # pending / pickup_now / delivering / arrived
-    # / completed / returned_cancelled / returned_timeout / voided / rejected_at_door
+    # / completed / returned_timeout / voided / rejected_at_door
     door_id = Column(String(10), nullable=True)                # 分配的艙門編號
     arrived_at = Column(DateTime, nullable=True)                # 機器人抵達時間，逾時判斷用
     door_closed_at = Column(DateTime, nullable=True)            # 拒收後管理員取出包裹、按關門的時間
