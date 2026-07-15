@@ -35,6 +35,7 @@ class Package(Base):
     door_id = Column(String(10), nullable=True)                # 分配的艙門編號
     arrived_at = Column(DateTime, nullable=True)                # 機器人抵達時間，逾時判斷用
     door_closed_at = Column(DateTime, nullable=True)            # 拒收後管理員取出包裹、按關門的時間
+    acknowledged_at = Column(DateTime, nullable=True)            # 不收(voided)的包裹，管理員按「確定」已知悉的時間
     created_at = Column(DateTime, default=now_taipei)
     updated_at = Column(DateTime, default=now_taipei, onupdate=now_taipei)
 
@@ -72,7 +73,7 @@ class TaskLog(Base):
     # created / rejected / rejected_at_door / door_assigned / door_assign_failed / dispatched / dispatch_failed
     # / arrived / pickup_opened / pickup_open_failed / completed / complete_failed
     # / returned_timeout / returned / cancel_task_failed / returned_and_opened / return_failed
-    # / door_closed / close_door_failed
+    # / door_closed / close_door_failed / notify_failed / voided_acknowledged
     level = Column(String(10), nullable=False, default="info")  # info / warning / error
     detail = Column(String(500), nullable=True)
     created_at = Column(DateTime, default=now_taipei)

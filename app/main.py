@@ -68,6 +68,20 @@ async def line_webhook(request: Request):
                 if binding:
                     binding.status = "inactive"
                     db.commit()
+                    log_event(
+                        db, "user_unfollowed",
+                        detail=f"unit={binding.unit} name={binding.name} 已設為inactive",
+                    )
+                else:
+                    # 查不到對應的綁定資料——常見於：這個user_id屬於舊的LINE channel，
+                    # 換channel之後跟現在資料庫裡的line_user_id對不上，屬於預期內的情況，
+                    # 但如果一直看到這個log卻預期應該要有綁定，就代表channel/資料對不起來
+                    print(f"[unfollow] 查無對應綁定, user_id={event.source.user_id}")
+                    log_event(
+                        db, "user_unfollowed",
+                        detail=f"查無對應的LineBinding, user_id={event.source.user_id}",
+                        level="warning",
+                    )
             finally:
                 db.close()
 
@@ -301,10 +315,11 @@ def handle_postback(data: str, reply_token: str, triggered_by: str):
 
                 for line_user_id in get_recipients(db, package_id):
                     if line_user_id != triggered_by:
-                        push_status_update(
-                            line_user_id,
-                            f"{triggered_name} 已取消這次收件，包裹不會派送",
-                        )
+                        pass
+                        # push_status_update(
+                        #     line_user_id,
+                        #     f"{triggered_name} 已取消這次收件，包裹不會派送",
+                        # )
             else:
                 reply_text(reply_token, "這筆包裹目前無法取消收件")
 
@@ -401,16 +416,33 @@ async def create_package(payload: CreatePackageRequest, db: Session = Depends(ge
         db.add(PackageRecipient(package_id=package.id, line_user_id=binding.line_user_id, unit=payload.unit))
     db.commit()
 
+    notify_failed = []
     for binding in targets:
-        push_arrival_notification(binding.line_user_id, str(package.id), payload.unit)
+        try:
+            push_arrival_notification(binding.line_user_id, str(package.id), payload.unit)
+        except Exception as e:
+            # 包裹已經成功建立了，通知失敗不該讓整個request看起來像失敗，
+            # 記下來讓管理員知道這個人可能沒收到通知就好
+            notify_failed.append(binding.name)
+            log_event(
+                db, "notify_failed",
+                detail=f"推播到貨通知給 {binding.name} 失敗: {e}",
+                package_id=package.id, level="error",
+            )
 
     log_event(
         db, "created",
-        detail=f"unit={payload.unit} notified_count={len(targets)}",
+        detail=f"unit={payload.unit} notified_count={len(targets)}"
+        + (f" 通知失敗: {', '.join(notify_failed)}" if notify_failed else ""),
         package_id=package.id,
     )
 
-    return {"status": "ok", "package_id": str(package.id), "notified_count": len(targets)}
+    return {
+        "status": "ok",
+        "package_id": str(package.id),
+        "notified_count": len(targets) - len(notify_failed),
+        "notify_failed": notify_failed,
+    }
 
 # ========== 管理員後台 API ==========
 
@@ -426,9 +458,53 @@ async def admin_list_packages(db: Session = Depends(get_db)):
             "door_id": p.door_id,
             "created_at": p.created_at.isoformat() if p.created_at else None,
             "door_closed_at": p.door_closed_at.isoformat() if p.door_closed_at else None,
+            "acknowledged_at": p.acknowledged_at.isoformat() if p.acknowledged_at else None,
         }
         for p in packages
     ]
+
+
+# 8種實際狀態 → 4種給管理員查詢用的簡化分類
+STATUS_BUCKET = {
+    "completed": "已完成",
+    "delivering": "派送中",
+    "arrived": "派送中",
+    "rejected_at_door": "已退回",
+    "returned_timeout": "已退回",
+    "pending": "尚未派工",
+    "pickup_now": "尚未派工",
+    "voided": "尚未派工",
+}
+
+
+@app.get("/admin/packages/by-unit")
+async def admin_packages_by_unit(unit: str, db: Session = Depends(get_db)):
+    """管理員輸入門牌查詢這個門牌下所有包裹，狀態歸類成4種簡化分類方便一眼看懂"""
+    packages = (
+        db.query(Package)
+        .filter(Package.unit == unit)
+        .order_by(Package.created_at.desc())
+        .all()
+    )
+
+    result = []
+    for p in packages:
+        binding = db.query(LineBinding).filter(LineBinding.line_user_id == p.line_user_id).first()
+        if not binding:
+            recipient_name = "未知"
+        elif binding.status != "active":
+            recipient_name = f"{binding.name}（已封鎖/停用）"
+        else:
+            recipient_name = binding.name
+        result.append({
+            "id": str(p.id),
+            "unit": p.unit,
+            "recipient_name": recipient_name,
+            "raw_status": p.status,
+            "bucket": STATUS_BUCKET.get(p.status, p.status),
+            "created_at": p.created_at.isoformat() if p.created_at else None,
+        })
+    return result
 
 
 @app.get("/admin/bindings")
@@ -443,7 +519,7 @@ async def admin_list_bindings(db: Session = Depends(get_db)):
 
 @app.get("/admin/robot-status")
 async def admin_robot_status():
-    """轉發呼叫機器人的即時狀態（位置、電量、三個艙門狀況）"""
+    """轉發呼叫機器人的即時狀態（位置、電量、各艙門狀況）"""
     try:
         resp = requests.get(f"{settings.ROBOT_API_BASE_URL}/api/dashboard/status", timeout=5)
         if resp.status_code != 200:
@@ -529,9 +605,6 @@ async def confirm_dispatch(package_id: str, payload: ConfirmDispatchRequest = No
         )
 
     ok, resp, error = call_robot_api("POST", "/api/doors/load", json={"id": package_id}, retries=1)
-    if not ok:
-        log_event(db, "dispatch_failed", detail=f"裝載艙門失敗: {error}", package_id=package.id, level="error")
-        raise HTTPException(status_code=502, detail="機器人裝載艙門失敗，請確認艙門與連線狀態後再試")
 
     package.status = "delivering"
     db.commit()
@@ -580,7 +653,10 @@ async def robot_arrived(package_id: str, db: Session = Depends(get_db)):
     log_event(db, "arrived", package_id=package.id)
 
     for line_user_id in get_recipients(db, package_id):
-        push_arrived_notification(line_user_id, str(package.id))
+        try:
+            push_arrived_notification(line_user_id, str(package.id))
+        except Exception as e:
+            log_event(db, "notify_failed", detail=f"推播抵達通知失敗: {e}", package_id=package.id, level="error")
 
     return {"status": "ok", "package_id": str(package.id), "new_status": package.status}
 
@@ -621,8 +697,11 @@ async def pickup_verify(package_id: str, payload: PickupVerifyRequest = None, db
 
     log_event(db, "pickup_opened", detail=f"scanned_by={scanning_user_id}", package_id=package.id)
 
-   # for line_user_id in get_recipients(db, package_id):
-   #     push_pickup_complete_button(line_user_id, str(package.id))
+    for line_user_id in get_recipients(db, package_id):
+        try:
+            push_pickup_complete_button(line_user_id, str(package.id))
+        except Exception as e:
+            log_event(db, "notify_failed", detail=f"推播取貨完成按鈕失敗: {e}", package_id=package.id, level="error")
 
     return {"status": "ok", "message": "驗證通過，艙門已開啟"}
 
@@ -806,6 +885,30 @@ async def close_door_after_reject(package_id: str, db: Session = Depends(get_db)
 
     return {"status": "ok", "package_id": str(package.id)}
 
+
+@app.post("/packages/{package_id}/acknowledge")
+async def acknowledge_voided_package(package_id: str, db: Session = Depends(get_db)):
+    """
+    不收（voided）的包裹沒有機器人動作要做，不需要開關門，
+    純粹是管理員在Dashboard紅色提示框裡按「確定」，表示已經知悉這件事、不用再提醒。
+    """
+    package = get_package_or_404(db, package_id)
+
+    if package.status != "voided":
+        raise HTTPException(
+            status_code=400,
+            detail=f"這筆包裹目前狀態是 {package.status}，不是不收（作廢）的狀態",
+        )
+
+    if package.acknowledged_at is not None:
+        raise HTTPException(status_code=400, detail="這筆包裹已經確認過了")
+
+    package.acknowledged_at = now_taipei()
+    db.commit()
+    log_event(db, "voided_acknowledged", package_id=package.id)
+
+    return {"status": "ok", "package_id": str(package.id)}
+
 # ========== QR Code 掃描 LIFF ==========
 
 @app.get("/liff/scan", response_class=HTMLResponse)
@@ -939,6 +1042,10 @@ ADMIN_DASHBOARD_HTML = """
     margin-bottom: 20px; font-size: 14px; box-shadow: 0 1px 4px rgba(0,0,0,0.2); }
   .reject-alert b { display: block; font-size: 15px; margin-bottom: 6px; }
   .reject-alert ul { margin: 0; padding-left: 20px; }
+  .reject-alert table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+  .reject-alert th, .reject-alert td { text-align: left; padding: 6px 10px; font-size: 14px;
+    border-bottom: 1px solid rgba(255,255,255,0.35); }
+  .reject-alert th { font-weight: normal; opacity: 0.85; }
   #createMsg { margin-top: 8px; font-size: 14px; }
   .robot-info { display: flex; gap: 24px; flex-wrap: wrap; margin-bottom: 16px; }
   .robot-info div { font-size: 14px; text-align: center; }
@@ -964,9 +1071,16 @@ ADMIN_DASHBOARD_HTML = """
 </head>
 <body>
 
-<h1> FlashBot Dashboard
-  <a href="/admin/reports" style="font-size:14px;font-weight:normal;color:#E2231A;margin-left:16px;">查看每日報表 →</a>
+<h1 style="display:flex;align-items:center;flex-wrap:wrap;gap:12px;">
+  <span>FlashBot Dashboard</span>
+  <a href="/admin/reports" style="font-size:14px;font-weight:normal;color:#E2231A;">查看每日報表 →</a>
+  <span style="margin-left:auto;display:flex;gap:8px;align-items:center;">
+    <input type="text" id="unitQueryInput" placeholder="輸入門牌查詢" style="width:220px;height:36px;padding:0 10px;border-radius:6px;border:1px solid #ccc;font-size:14px;line-height:34px;box-sizing:border-box;" />
+    <button id="unitQueryBtn" onclick="queryByUnit()" style="height:36px;padding:0 16px;font-size:14px;line-height:36px;box-sizing:border-box;">查詢</button>
+  </span>
 </h1>
+
+<div id="unitQueryResult" style="margin-bottom:20px;"></div>
 
 <div class="card">
   <h2>建立包裹</h2>
@@ -1055,8 +1169,13 @@ async function createPackage() {
     });
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.detail || '建立失敗');
-    msgEl.style.color = 'green';
-    msgEl.textContent = `建立成功，已通知 ${data.notified_count} 位住戶`;
+    if (data.notify_failed && data.notify_failed.length > 0) {
+      msgEl.style.color = '#b58105';
+      msgEl.textContent = `建立成功，已通知 ${data.notified_count} 位住戶，但 ${data.notify_failed.join('、')} 通知失敗（請確認LINE綁定是否正常）`;
+    } else {
+      msgEl.style.color = 'green';
+      msgEl.textContent = `建立成功，已通知 ${data.notified_count} 位住戶`;
+    }
     loadPackages();
   } catch (e) {
     msgEl.style.color = 'red';
@@ -1070,8 +1189,8 @@ async function createPackage() {
 const STATUS_LABEL = {
   pending: '待處理', pickup_now: '待派送',
   delivering: '配送中', arrived: '已抵達', completed: '已完成',
-  returned_timeout: '作廢（逾時）',
-  voided: '作廢（不收）', rejected_at_door: '作廢（拒收）',
+  returned_timeout: '逾時（作廢）',
+  voided: '不收（作廢）', rejected_at_door: '拒收（作廢）',
 };
 
 async function loadPackages() {
@@ -1090,11 +1209,11 @@ async function loadPackages() {
     const label = STATUS_LABEL[p.status] || p.status;
     const createdAt = p.created_at ? p.created_at.replace('T', ' ').slice(0, 16) : '-';
     const door = p.door_id || '尚未分配';
+    // 拒收/逾時/不收這幾個狀態的操作按鈕，已經統一在上面的紅色提示框處理了，
+    // 這裡不再重複放按鈕，避免同一筆包裹在畫面上出現兩個功能一樣的按鈕
     const action = p.status === 'pickup_now'
       ? `<button onclick="dispatchPackage(this, '${p.id}')">確認派送</button>`
-      : ((p.status === 'rejected_at_door' || p.status === 'returned_timeout') && !p.door_closed_at)
-        ? `<button onclick="closeDoor(this, '${p.id}')">關門</button>`
-        : '-';
+      : '-';
     return `<tr>
       <td>${p.unit}</td>
       <td><span class="status-badge status-${p.status}">${label}</span></td>
@@ -1105,9 +1224,10 @@ async function loadPackages() {
 
 function renderRejectAlert(packages) {
   const alertEl = document.getElementById('rejectAlert');
-  // 拒收或逾時退回、機器人已送回管理室，但管理員還沒按「關門」確認取出包裹的
+  // 拒收/逾時退回（機器人已送回，等關門）+ 不收/作廢（不需要機器人動作，等管理員確認知悉）
   const pending = packages.filter(p =>
-    (p.status === 'rejected_at_door' || p.status === 'returned_timeout') && !p.door_closed_at
+    ((p.status === 'rejected_at_door' || p.status === 'returned_timeout') && !p.door_closed_at)
+    || (p.status === 'voided' && !p.acknowledged_at)
   );
 
   if (pending.length === 0) {
@@ -1116,16 +1236,93 @@ function renderRejectAlert(packages) {
     return;
   }
 
-  const reasonLabel = { rejected_at_door: '拒收', returned_timeout: '逾時未取' };
+  const reasonLabel = { rejected_at_door: '拒收', returned_timeout: '逾時未取', voided: '不收（作廢）' };
+  const btnStyle = 'background:white;color:#dc3545;border:none;padding:6px 14px;border-radius:6px;font-size:13px;cursor:pointer;';
 
   alertEl.style.display = 'block';
   alertEl.innerHTML = `
-    <b>有 ${pending.length} 筆包裹退回，機器人已送回管理室，請盡快取出包裹並按「關門」</b>
-    <ul>
-      ${pending.map(p => `<li>門牌：${p.unit}（艙門：${p.door_id || '未知'}，原因：${reasonLabel[p.status] || p.status}）</li>`).join('')}
-    </ul>
+    <b>有 ${pending.length} 筆包裹需要處理，請確認</b>
+    <table>
+      <thead><tr><th>門牌</th><th>艙門</th><th>原因</th><th>操作</th></tr></thead>
+      <tbody>
+        ${pending.map(p => {
+          const action = p.status === 'voided'
+            ? `<button style="${btnStyle}" onclick="acknowledgeVoid(this, '${p.id}')">確定</button>`
+            : `<button style="${btnStyle}" onclick="closeDoor(this, '${p.id}')">關門</button>`;
+          return `<tr>
+          <td>${p.unit}</td>
+          <td>${p.door_id || '-'}</td>
+          <td>${reasonLabel[p.status] || p.status}</td>
+          <td>${action}</td>
+        </tr>`;
+        }).join('')}
+      </tbody>
+    </table>
   `;
 }
+
+const BUCKET_STYLE = {
+  '已完成': 'background:#e2e3e5;color:#383d41;',
+  '派送中': 'background:#cfe2ff;color:#084298;',
+  '已退回': 'background:#dc3545;color:white;font-weight:bold;',
+  '尚未派工': 'background:#fff3cd;color:#664d03;',
+};
+
+async function queryByUnit() {
+  const unit = document.getElementById('unitQueryInput').value.trim();
+  const resultEl = document.getElementById('unitQueryResult');
+  const btn = document.getElementById('unitQueryBtn');
+  if (!unit) {
+    resultEl.innerHTML = '<span style="color:red">請輸入門牌</span>';
+    return;
+  }
+
+  btn.disabled = true;
+  const originalText = btn.textContent;
+  btn.textContent = '查詢中...';
+  try {
+    const resp = await fetch(`/admin/packages/by-unit?unit=${encodeURIComponent(unit)}`);
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || '查詢失敗');
+
+    if (data.length === 0) {
+      resultEl.innerHTML = `<span style="color:#888">門牌「${unit}」目前沒有任何包裹紀錄</span>`;
+      return;
+    }
+
+    resultEl.innerHTML = `
+      <table>
+        <thead><tr><th>建立時間</th><th>狀態</th><th>收件人</th><th>包裹ID</th></tr></thead>
+        <tbody>
+          ${data.map(p => {
+            const style = BUCKET_STYLE[p.bucket] || '';
+            const createdAt = p.created_at ? p.created_at.replace('T', ' ').slice(0, 16) : '-';
+            return `<tr>
+              <td>${createdAt}</td>
+              <td><span class="status-badge" style="${style}">${p.bucket}</span></td>
+              <td>${p.recipient_name}</td>
+              <td style="font-size:11px;color:#888">${p.id}</td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+    `;
+  } catch (e) {
+    resultEl.innerHTML = `<span style="color:red">查詢失敗：${e.message}</span>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = originalText;
+  }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  const input = document.getElementById('unitQueryInput');
+  if (input) {
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') queryByUnit();
+    });
+  }
+});
 
 async function dispatchPackage(btn, packageId) {
   btn.disabled = true;
@@ -1154,6 +1351,22 @@ async function closeDoor(btn, packageId) {
     loadPackages();
   } catch (e) {
     alert('關門失敗：' + e.message);
+    btn.disabled = false;
+    btn.textContent = originalText;
+  }
+}
+
+async function acknowledgeVoid(btn, packageId) {
+  btn.disabled = true;
+  const originalText = btn.textContent;
+  btn.textContent = '確認中...';
+  try {
+    const resp = await fetch(`/packages/${packageId}/acknowledge`, { method: 'POST' });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || '確認失敗');
+    loadPackages();
+  } catch (e) {
+    alert('確認失敗：' + e.message);
     btn.disabled = false;
     btn.textContent = originalText;
   }
