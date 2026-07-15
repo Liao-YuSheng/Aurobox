@@ -5,7 +5,7 @@ from flask import Flask, jsonify
 from .models import db, Door, DoorStatus
 from .config import load_config
 
-DEFAULT_DOOR_NUMBERS = ("H_01", "H_02", "H_03")
+DEFAULT_DOOR_NUMBERS = ("H_01", "H_02", "H_03", "H_04")  # 預設艙門號碼，請依實際硬體調整
 
 def ensure_default_doors(app: Flask) -> None:
     """Ensure default doors exist and reset them to empty at startup."""

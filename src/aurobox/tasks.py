@@ -8,7 +8,7 @@ def _return_for_assign(
     sn: str,
     door_number: int,
     package_id: str,
-    timeout_seconds: int = 3000,
+    timeout_seconds: int = 300,
     poll_interval: int = 5,
 ):
     """背景執行緒：輪詢機器人直到抵達管理室，然後才把分配的艙門打開。"""
@@ -40,7 +40,7 @@ def _poll_notify_display_qr(
     package_id: str,
     callback_base_url: str,
     task: str = None,
-    timeout_seconds: int = 3000,
+    timeout_seconds: int = 300,
     poll_interval: int = 5,
 ) -> None:
     """背景執行緒：輪詢機器人狀態直到抵達，再通知中央大腦。"""
@@ -98,12 +98,12 @@ def _return_home_and_open_doors(
     controller,
     sn: str,
     door_numbers: list,
-    timeout_seconds: int = 3000,
+    timeout_seconds: int = 300,
     poll_interval: int = 5,
 ):
     """背景執行緒：輪詢機器人直到抵達管理室，然後打開有退件的艙門。"""
     with app.app_context():
-        time.sleep(3)
+        time.sleep(15)  # 等待機器人抵達管理室的時間，避免過早輪詢
         
         print(f"[系統] 開始輪詢機器人是否抵達管理室 (準備開啟退件艙門: {door_numbers})", flush=True)
         

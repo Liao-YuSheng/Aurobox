@@ -11,7 +11,7 @@ def build_custom_call_payload(
     call_mode: str = 'CALL',
     task_id: str | None = None,
     mode_data: dict | None = None,
-    do_not_queue: bool = False,
+    do_not_queue: bool = True,
     robot_group_ids: list | None = None,
     filter_category_ids: list | None = None,
     priority: int = 1,

@@ -19,7 +19,7 @@ class Door(db.Model):
     __table_args__ = (
         db.UniqueConstraint("sn", "door_number", name="uq_doors_sn_door_number"),
         db.CheckConstraint(
-            "door_number IN ('H_01', 'H_02', 'H_03')",
+            "door_number IN ('H_01', 'H_02', 'H_03', 'H_04')",
             name="ck_doors_allowed_numbers",
         ),
         db.CheckConstraint(

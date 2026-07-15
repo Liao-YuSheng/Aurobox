@@ -1,6 +1,7 @@
 """API routes for Robot Hardware & Door management."""
 
 import threading
+import time
 from flask import Blueprint, request, jsonify, current_app
 from . import db
 from .models import Door, DoorStatus, RobotState
@@ -12,7 +13,7 @@ from .tasks import _return_for_assign, _poll_notify_display_qr, _return_home_and
 api_bp = Blueprint('api', __name__)
 
 # ==========================================================
-# 0. 分派空艙門並為管理員開門 (Assign & Open) -- 多包裹維持單一艙門分派
+# 0. 分派空艙門並為管理員開門 (Assign & Open)
 # ==========================================================
 @api_bp.route('/doors/assign', methods=['POST'])
 def assign_door_for_package():
@@ -22,7 +23,7 @@ def assign_door_for_package():
     """
     
     data = request.get_json()
-    package_id = data.get('id')
+    package_id = data.get('id') or data.get('package_id')
     """
     print("\n" + "="*40, flush=True)
     print(f"包裹 ID : {package_id}", flush=True)
@@ -77,71 +78,64 @@ def assign_door_for_package():
         return jsonify({'error': str(e)}), 500
 
 # ==========================================================
-# 1. 管理員將包裹放入艙門並確認 (Load) -- 多包裹直接關閉所有艙門
+# 1. 管理員將包裹放入艙門並確認 (Load)
 # ==========================================================
 @api_bp.route('/doors/load', methods=['POST'])
 def load_package_to_door():
     """
-    中央大腦通知：管理員已將包裹全數放入艙門，準備出發。
-    【本機動作】：找出所有狀態為 ASSIGNED 的艙門 -> 關閉艙門 -> 狀態改為 FULL。
+    中央大腦通知：管理員已將包裹放入指定艙門。
+    【本機動作】：依 package_id 找到對應艙門 -> 關閉艙門 -> 狀態改為 FULL。
     """
-    sn = current_app.config.get('ROBOT_SN')
     
-    # 1. 尋找本機所有狀態為 ASSIGNED 的艙門
-    assigned_doors = Door.query.filter_by(sn=sn, status=DoorStatus.ASSIGNED).all()
+    data = request.get_json()
+    package_id = data.get('id') or data.get('package_id')
+    """
+    print("\n" + "="*40, flush=True)
+    print(f"包裹 ID : {package_id}", flush=True)
+    print("="*40 + "\n", flush=True)
+    """
 
-    if not assigned_doors:
-        return jsonify({'error': 'No doors in ASSIGNED state to load'}), 400
+    if not package_id:
+        return jsonify({'error': 'package_id is required'}), 400
+
+    sn = current_app.config.get('ROBOT_SN')
+    door = Door.query.filter_by(package_id=package_id, sn=sn).first()
+
+    if not door:
+        return jsonify({'error': f'No door found for package_id {package_id}'}), 404
+
+    # 確保該門有被指派
+    if door.status != DoorStatus.ASSIGNED:
+        return jsonify({'error': f'Door {door.door_number} is not in ASSIGNED state'}), 400
 
     controller = get_controller()
-    loaded_doors_info = []
 
     try:
-        # 2. 針對每一個 ASSIGNED 艙門進行關門與狀態更新
-        for door in assigned_doors:
-            # 呼叫普渡 API：關門 (operation=False)
-            controller.control_doors(sn=sn, door_number=door.door_number, operation=False)
+        # 1. 呼叫普渡 API：關門
+        controller.control_doors(sn=sn, door_number=door.door_number, operation=False)
 
-            # 更新資料庫狀態為 FULL
-            door.status = DoorStatus.FULL
-            
-            # 記錄起來準備回傳給中控端
-            loaded_doors_info.append({
-                'door_number': door.door_number,
-                'package_id': door.package_id
-            })
-
-        # 3. 統一 Commit 寫入資料庫
+        # 2. 更新資料庫狀態為 FULL
+        door.status = DoorStatus.FULL
         db.session.commit()
 
         return jsonify({
             'status': 'success',
-            'message': f'Successfully closed and loaded {len(assigned_doors)} doors.',
-            'loaded_doors': loaded_doors_info
+            'message': f'Door {door.door_number} closed and marked as FULL with {door.package_id}',
+            'door_number': door.door_number,
         })
-        
     except Exception as e:
-        import traceback
-        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
     
 # ==========================================================
-# 2. 指揮機器人移動 (Dispatch)  -- 多包裹維持單一包裹配送
+# 2. 指揮機器人移動 (Dispatch)
 # ==========================================================
 @api_bp.route('/robot/dispatch', methods=['POST'])
 def robot_dispatch():
     """中央大腦下令：機器人出發前往指定點位 (例如住戶家門口)"""
     data = request.get_json()
     target_point = data.get('point') or data.get('unit')
-    target_point_type = data.get('point_type', 'table')
-    target_map_name = data.get('map_name')
-    package_id = data.get('package_id')
-    """
-    print("\n" + "="*40, flush=True)
-    print(f"住戶門牌  : {target_point}", flush=True)
-    print(f"包裹 ID   : {package_id}", flush=True)
-    print("="*40 + "\n", flush=True)
-    """
+    package_id = data.get('id') or data.get('package_id')
+
     if not target_point:
         return jsonify({'error': 'point is required (or use unit for backward compatibility)'}), 400
 
@@ -154,8 +148,6 @@ def robot_dispatch():
             sn=sn,
             point=target_point,
             call_mode = 'QR_CODE',
-            map_name=target_map_name,
-            point_type=target_point_type,
         )
 
         # 1. 抓取回傳的 response
@@ -174,7 +166,7 @@ def robot_dispatch():
                     door.task_id = task
                     db.session.commit()
         else:
-            print(f"[系統] ⚠️ 未能取得 Task ID，回傳結果: {dispatch_res}", flush=True)
+            print(f"[系統] 未能取得 Task ID，回傳結果: {dispatch_res}", flush=True)
 
         # 若有 package_id，背景輪詢機器人狀態，抵達後通知中央大腦
         if package_id:
@@ -216,7 +208,7 @@ def package_pickup_complete(package_id):
     # 新增：利用記錄在資料庫的 task_id 消除機器人螢幕的 QR Code
     if door.task_id:
         try:
-            payload_complete = {"task_id": door.task_id}
+            payload_complete = {"task_id": door.task_id, "do_not_queue": True}
             controller.client.custom_complete(payload_complete)
             print(f"[系統] 成功消除 QR Code 畫面 (Task: {door.task_id})", flush=True)
         except Exception as e:
@@ -298,7 +290,7 @@ def package_cancel(package_id):
         # 2. 消除機器人螢幕的 QR Code 任務畫面
         if door.task_id:
             print(f"[系統] 準備消除機器人螢幕的 QR Code (Task ID: {door.task_id})", flush=True)
-            payload_complete = {"task_id": door.task_id}
+            payload_complete = {"task_id": door.task_id, "do_not_queue": True}
             controller.client.custom_complete(payload_complete)
             print(f"[系統] 成功消除 QR Code 畫面", flush=True)
             
@@ -339,12 +331,13 @@ def return_packages_to_home():
 
     try:
         # 1. 呼叫機器人前往管理室
+        time.sleep(6)
         home_point = current_app.config.get('HOME_POINT_NAME')
         payload = build_custom_call_payload(sn=sn, point=home_point)
         print(f"[系統] 呼叫機器人前往 {home_point}...", flush=True)
         controller.custom_call2(payload=payload)
         set_robot_target_point(sn, home_point)
-        
+        # time.sleep(6)
         # 2. 啟動背景執行緒去等機器人抵達並開門
         app = current_app._get_current_object()
         thread = threading.Thread(
@@ -428,6 +421,7 @@ def get_dashboard_status():
         if move_state == "MOVING":
             live_status['current_location'] = "MOVING"
         else:
+            
             # 如果是 IDLE 或 ARRIVE，就顯示我們記下來的最後點位
             live_status['current_location'] = last_point
 

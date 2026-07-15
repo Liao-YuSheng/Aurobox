@@ -53,7 +53,8 @@ def main():
     app.run(
         host=args.host,
         port=args.port,
-        debug=args.debug
+        debug=args.debug,
+        use_reloader=True
     )
 
 if __name__ == '__main__':
