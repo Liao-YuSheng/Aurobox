@@ -42,6 +42,7 @@ scripts/
 └── read_maps_and_position.py
 
 tests/
+├── test_api_integration.py
 └── test_pudu_client.py
 
 run.py
@@ -80,6 +81,12 @@ Windows PowerShell:
 python -m pip install -e .
 ```
 
+若要安裝開發與測試工具：
+
+```bash
+python -m pip install -e ".[dev]"
+```
+
 3. 建立 `.env`
 
 ```env
@@ -95,11 +102,7 @@ CENTRAL_API_BASE_URL=https://your-central-api.example.com
 4. 啟動服務
 
 ```bash
-python run.py --debug
-```
-
-```bash
-python3 run.py 2>&1 | tee -a aurobox.log
+python3 -u run.py --debug 2>&1 | tee -a instance/aurobox.log
 ```
 
 預設監聽：`http://0.0.0.0:5000`
@@ -144,7 +147,7 @@ aurobox --sn 8FF055923050007 recharge
 aurobox --sn 8FF055923050007 map-list
 aurobox --sn 8FF055923050007 door-state
 aurobox --shop-id YOUR_SHOP_ID open-map --map-name map1
-aurobox --sn 8FF055923050007 --shop-id YOUR_SHOP_ID call --map-name map1 --point 管理室
+aurobox --sn 8FF055923050007 --shop-id YOUR_SHOP_ID call --map-name map1 --point 閃閃充電
 ```
 
 ## 狀態整合策略
@@ -157,19 +160,26 @@ aurobox --sn 8FF055923050007 --shop-id YOUR_SHOP_ID call --map-name map1 --point
 
 並輸出統一欄位如 `state`、`move_state`、`run_state`、`task_state`、`battery_level`、`current_location`。
 
-## 已知問題（2026-07-14）
-
-- `examples.py` 仍引用舊版 `manager.py` 與歷史資料模型，與目前 0.2.0 架構不一致。
-
 ## 測試
 
 ```bash
 pytest -q
 ```
 
-目前測試以設定與初始化為主（`tests/test_pudu_client.py`）。
+目前測試涵蓋：
+
+- 設定載入與初始化（`tests/test_pudu_client.py`）
+- API 流程整合（`tests/test_api_integration.py`）
+  - `assign -> load`
+  - `dispatch`（含 task_id 寫入）
+  - `complete`
+  - `cancel`
+
+## 已知問題
+
+- 目前無阻擋性已知問題。
 
 ## 版本資訊
 
-- 套件版本：`0.2.0`
+- 套件版本：`0.2.1`
 - 本次盤點報告：`REPORT.md`

@@ -37,3 +37,4 @@ def test_flashbot_controller_initialization():
     controller = FlashbotController()
     assert controller.client is not None
     assert controller.default_sn is not None
+

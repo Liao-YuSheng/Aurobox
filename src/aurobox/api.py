@@ -421,7 +421,7 @@ def get_dashboard_status():
         if move_state == "MOVING":
             live_status['current_location'] = "MOVING"
         else:
-            
+
             # 如果是 IDLE 或 ARRIVE，就顯示我們記下來的最後點位
             live_status['current_location'] = last_point
 
