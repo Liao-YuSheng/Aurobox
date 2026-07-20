@@ -25,6 +25,7 @@
 
 **機器人整合**
 - 完整狀態機：`pending → pickup_now → delivering → arrived → completed`，另有 `rejected_at_door` / `returned_timeout` / `voided` 三種例外分支
+- 目前艙位為四艙位、五包裹容量，多包裹批次派送機制（`place_package`／`admin_dispatch_batch`／`advance_trip_or_return`）為啟用中的主要流程
 - 多包裹批次派送：一次關閉所有已裝載艙門，依序派往每一站（`advance_trip_or_return`），整趟結束後自動判斷要不要帶回未完成的包裹
 - 拒收/逾時退回統一走「機器人關門帶回管理室＋管理員取出後按關門」流程
 
@@ -38,7 +39,7 @@ pending → pickup_now → delivering → arrived → completed
 
 ### 待辦／已知風險
 
-**需要機器人API配合**
+**需要機器人team配合**
 - 機器人回到管理室目前是自動開門，設計上應改成管理員在Dashboard按「開門」才真的開——LINE後端這邊的欄位與API已設計完成（`returned_at`／`return_door_opened_at`／`POST /packages/{id}/open-return-door`），需要機器人team：(1) 回管理室時門保持關閉，(2) 提供對應的 `/api/doors/return-open` API，兩邊確認規格後再一起上線
 
 **尚未處理的邊界情況**（依風險排序）
@@ -54,7 +55,6 @@ pending → pickup_now → delivering → arrived → completed
 **功能性待辦**
 - 住戶綁定沒有身份驗證，任何人輸入任意「門牌 姓名」都能綁定成功——規劃中的解法是白名單機制（管理員預先登記每個門牌對應的住戶姓名，綁定時比對，不符合就拒絕），需要先取得完整住戶名冊才能上線，目前尚未實作
 - 圖形化Rich Menu（四按鈕：我的包裹／開啟限本人通知／關閉限本人通知／使用說明），已設計、PNG已生成，尚未部署，目前用文字指令代替
-- 三艙位四包裹容量排隊邏輯（`process_door_queue`／`try_assign_door`重試機制）已寫好但停用中，供未來擴充使用
 - `/admin/*` 所有路由目前沒有任何身份驗證機制
 - `/admin/packages` 沒有後端分頁或日期篩選，包裹資料長期累積後查詢效能可能變差
 
@@ -126,5 +126,5 @@ ngrok http 8000
 啟動伺服器後，開啟 `http://localhost:8000/docs` 可以互動測試所有API端點。
 
 ## 需要跟機器人模組確認的事項
-1. 機器人回到管理室後的開門時機（見上方「需要機器人配合」）
+1. 機器人回到管理室後的開門時機（見上方「需要機器人team配合」）
 2. Pudu API連線狀態與艙門即時狀態，目前是LINE後端主動呼叫 `/api/dashboard/status` 轉發給Dashboard顯示
