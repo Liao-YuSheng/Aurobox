@@ -38,7 +38,7 @@ pending → pickup_now → delivering → arrived → completed
 
 ### 待辦／已知風險
 
-**需要機器人team配合**
+**需要機器人API配合**
 - 機器人回到管理室目前是自動開門，設計上應改成管理員在Dashboard按「開門」才真的開——LINE後端這邊的欄位與API已設計完成（`returned_at`／`return_door_opened_at`／`POST /packages/{id}/open-return-door`），需要機器人team：(1) 回管理室時門保持關閉，(2) 提供對應的 `/api/doors/return-open` API，兩邊確認規格後再一起上線
 
 **尚未處理的邊界情況**（依風險排序）
@@ -126,5 +126,5 @@ ngrok http 8000
 啟動伺服器後，開啟 `http://localhost:8000/docs` 可以互動測試所有API端點。
 
 ## 需要跟機器人模組確認的事項
-1. 機器人回到管理室後的開門時機（見上方「需要機器人team配合」）
+1. 機器人回到管理室後的開門時機（見上方「需要機器人配合」）
 2. Pudu API連線狀態與艙門即時狀態，目前是LINE後端主動呼叫 `/api/dashboard/status` 轉發給Dashboard顯示
