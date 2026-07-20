@@ -1,52 +1,62 @@
 # LINE 後端 - 智連櫃社區 AMR 配送系統
 
-對應整體系統三大部分（管理員Dashboard／LINE／送貨機器人）中的LINE部分，這支服務同時提供 Dashboard 網頁本身（`/admin`）。
+對應整體系統三大部分（管理員Dashboard／LINE／送貨機器人）中的LINE部分。
 
-## 目前完成進度
+## 目前完成進度（更新於 2026/7/17）
 
 ### 已完成
 
 **住戶端（LINE）**
-- 用戶綁定：住戶在LINE聊天室輸入「門牌 姓名」完成綁定
-- 到貨通知：管理員登記包裹後，推播通知住戶，支援「限本人接收」設定（`solo_notify`，預設開啟）
-- 用戶可用文字指令「開啟限本人通知」／「關閉限本人通知」自行切換
-- 用戶回覆到貨通知：按「取貨」／「不收」（不收＝在管理員派工前就直接作廢，不會呼叫任何機器人動作）
-- 機器人抵達：推播提醒＋「開啟相機掃碼」＋「拒收」按鈕
-- 拒收（機器人已抵達後）：關門清任務畫面、觸發機器人送回管理室並自動開門，供管理員取出包裹
-- 住戶取貨（兩階段）：LIFF掃碼驗證身分＋開門，再由住戶按「取貨完成」按鈕確認（QR驗證邏輯已完成，比對`scanned_content`與LINE `id_token`）
-- 逾時自動退回：背景排程每分鐘檢查，超過8分鐘未完成取貨自動觸發（跟拒收共用同一套機器人動作：關門清畫面→送回開門）
-- 我的包裹查詢：文字指令「我的包裹」，列出所有還沒結束（非completed/voided/rejected_at_door/returned_timeout）的包裹，附狀態說明，只有`pending`狀態才附「現在取」按鈕
-- 用戶封鎖（Unfollow）處理：自動將對應綁定設為`inactive`，並記錄事件供追蹤
+- 用戶綁定：LINE聊天室輸入「門牌 姓名」完成綁定
+- 到貨通知：管理員建立包裹後推播，支援「限本人接收」（`solo_notify`）
+- 住戶回覆：「取貨」／「不收」
+- 抵達通知：推播提醒＋開啟相機掃碼按鈕＋「拒收」按鈕
+- QR掃碼驗證：LIFF掃碼內容比對＋LINE ID Token身份驗證＋收件人清單比對，三層驗證都通過才開門
+- 取貨完成兩階段：掃碼開門與按下「取貨完成」分開處理，已解決連續按兩次觸發的race condition
+- 逾時自動退回：背景排程每分鐘檢查，`arrived`狀態超過8分鐘自動觸發退回
+- 我的包裹查詢：文字指令「我的包裹」，排除已終止狀態的包裹
+- 開啟／關閉限本人通知：文字指令切換
 
-**管理員端（Dashboard, `/admin`）**
-- 建立包裹並通知（防連點）
-- 機器人即時狀態：位置、電量、各艙門狀況（自動輪詢，含機器人API原始資料結構的容錯解析）
-- 包裹清單：狀態徽章、艙門、建立時間
-- 門牌查詢框：輸入門牌查該門牌所有包裹歷史狀態（4種簡化分類：已完成／派送中／已退回／尚未派工），顯示收件人姓名（含是否已封鎖/停用標示）
-- 紅色提示框：拒收／逾時／不收（作廢）需要管理員處理的包裹，統一列表＋各自的操作按鈕（「關門」／「確定」），避免同一筆包裹在畫面上出現重複按鈕
-- 每日報表頁面（`/admin/reports`）：選日期查詢當天包裹狀態統計＋完整任務時間軸（`task_logs`表）
+**管理員後台（四頁）**
+- `/admin` Dashboard：建立包裹（門牌+收件人下拉選單）、機器人即時狀態（15/30秒自動輪詢）、包裹清單（每50筆分頁＋門牌查詢，查詢結果灰底顯示）、放置包裹＋全部批次派送、拒收/逾時/不收待處理提示框
+- `/admin/reports` 每日報表：包裹狀態統計、任務時間軸（依包裹分組，一頁顯示一筆包裹的完整紀錄）
+- `/admin/exceptions` 退回/作廢包裹處理：門牌查詢、「重新派貨」（沿用原門牌與收件人綁定建立全新包裹）、「銷案」（手動結案，只影響本頁顯示）、已重新派送且新包裹已完成的紀錄自動從頁面消失
+- `/admin/residents` 住戶綁定管理：查看所有門牌所有綁定（含已停用）、刪除誤綁或惡意綁定的LINE帳號
 
-**系統層**
-- 所有時間戳記統一存台灣當地時間（`now_taipei()`），不使用UTC
-- 所有呼叫機器人API的地方統一透過`call_robot_api()`，支援重試、失敗時不誤判為成功
-- 推播LINE訊息失敗（例如帳號已封鎖、token失效）不會讓API整個500，會記錄`notify_failed`並在Dashboard顯示
-- `package_id`格式驗證：避免不合法的UUID直接打進資料庫查詢造成500
-- 完整事件記錄（`task_logs`表）：取代原本只印在console、重啟就消失的log，可在每日報表回溯查詢
+**機器人整合**
+- 完整狀態機：`pending → pickup_now → delivering → arrived → completed`，另有 `rejected_at_door` / `returned_timeout` / `voided` 三種例外分支
+- 多包裹批次派送：一次關閉所有已裝載艙門，依序派往每一站（`advance_trip_or_return`），整趟結束後自動判斷要不要帶回未完成的包裹
+- 拒收/逾時退回統一走「機器人關門帶回管理室＋管理員取出後按關門」流程
 
-完整狀態機：
 ```
-pending ─┬─→ voided（不收，從未派工）
-         └─→ pickup_now → delivering → arrived ─┬─→ completed
-                                                  ├─→ rejected_at_door（拒收）
-                                                  └─→ returned_timeout（逾時未取，8分鐘）
+狀態機：
+pending → pickup_now → delivering → arrived → completed
+                                   ↘ rejected_at_door ─┐
+                       ↘ voided                        ├→ 例外處理頁
+       逾時8分鐘 → returned_timeout ────────────────────┘
 ```
 
-### 待辦
+### 待辦／已知風險
 
-- **多包裹批次派送**：目前「確認派送」是每筆包裹各自觸發（艙門數已擴充為4個，但派工仍是一對一）。若要支援「一次派送多筆、機器人自動依序跑完所有站再返回」，需要在完成/拒收/逾時各節點加上「檢查同一趟還有沒有下一站」的邏輯，這部分已有設計草案但尚未套用到目前這版程式碼
-- **Dashboard即時通知（SSE）**：目前Dashboard靠前端輪詢（15～30秒），尚未改成後端主動推播
-- **圖形化Rich Menu**：目前「我的包裹」、限本人通知切換都是純文字指令，尚未做成圖形選單
-- **一戶多人的完整查詢/操作權限**：通知端已支援（依`solo_notify`決定通知範圍），但「我的包裹」查詢目前只認建立包裹時記錄的主要收件人（`Package.line_user_id`），同門牌其他人查詢不到
+**需要機器人team配合**
+- 機器人回到管理室目前是自動開門，設計上應改成管理員在Dashboard按「開門」才真的開——LINE後端這邊的欄位與API已設計完成（`returned_at`／`return_door_opened_at`／`POST /packages/{id}/open-return-door`），需要機器人team：(1) 回管理室時門保持關閉，(2) 提供對應的 `/api/doors/return-open` API，兩邊確認規格後再一起上線
+
+**尚未處理的邊界情況**（依風險排序）
+- `delivering` 狀態沒有逾時偵測機制，機器人卡在半路不會被自動發現
+- 批次派送時「艙門已關但派送失敗」，包裹會卡在看不出異常的狀態，且不會出現在例外處理頁面
+- 背景排程逾時檢查跟使用者正在取貨的操作之間沒有互斥，理論上可能同時發生衝突
+- 若未來改用多worker部署，背景排程（APScheduler）會在每個worker各自重複執行
+- 同一門牌多筆包裹共用同一個艙門的情境，目前完全沒有群組化處理
+- 一戶多收件人各自操作時沒有互斥（例如一人在家點拒收、同時另一人正在機器人前取貨）
+- Webhook事件處理迴圈沒有try/except，單一事件解析失敗會讓同批次其餘事件無法被處理
+- `verify_liff_id_token` 沒有捕捉網路層例外（目前只處理LINE官方API回傳非200的情況）
+
+**功能性待辦**
+- 住戶綁定沒有身份驗證，任何人輸入任意「門牌 姓名」都能綁定成功——規劃中的解法是白名單機制（管理員預先登記每個門牌對應的住戶姓名，綁定時比對，不符合就拒絕），需要先取得完整住戶名冊才能上線，目前尚未實作
+- 圖形化Rich Menu（四按鈕：我的包裹／開啟限本人通知／關閉限本人通知／使用說明），已設計、PNG已生成，尚未部署，目前用文字指令代替
+- 三艙位四包裹容量排隊邏輯（`process_door_queue`／`try_assign_door`重試機制）已寫好但停用中，供未來擴充使用
+- `/admin/*` 所有路由目前沒有任何身份驗證機制
+- `/admin/packages` 沒有後端分頁或日期篩選，包裹資料長期累積後查詢效能可能變差
 
 ## 專案結構
 ```
@@ -58,9 +68,9 @@ line-backend/
     ├── db.py             # 資料庫連線設定
     ├── models.py         # Package、LineBinding、PackageRecipient、TaskLog 資料表定義
     ├── init_db.py        # 建立資料表用的腳本
-    ├── line_verify.py    # LIFF id_token 驗證（QR取貨流程用）
+    ├── line_verify.py    # 驗證LIFF傳來的LINE ID Token，確認掃碼者的真實身份
     ├── line_messaging.py # 封裝呼叫LINE Messaging API的邏輯
-    └── main.py           # FastAPI主程式、Webhook端點、Dashboard頁面、所有API路由
+    └── main.py           # FastAPI主程式、Webhook端點、所有API路由與管理後台四個頁面
 ```
 
 ## 快速開始
@@ -80,7 +90,7 @@ LINE_CHANNEL_SECRET=你的Channel Secret
 LINE_CHANNEL_ACCESS_TOKEN=你的Channel Access Token
 LIFF_ID=你的LIFF ID
 LINE_LOGIN_CHANNEL_ID=你的Login Channel ID
-ROBOT_API_BASE_URL=機器人服務的base URL
+ROBOT_API_BASE_URL=機器人模組的API網址
 DATABASE_URL=postgresql+psycopg://postgres:你的密碼@localhost:5432/aurobox_line
 APP_ENV=development
 ```
@@ -89,7 +99,8 @@ APP_ENV=development
 ```bash
 python -m app.init_db
 ```
-**注意**：目前部分欄位（例如`task_logs`表、`packages.door_closed_at`、`packages.acknowledged_at`）是後續開發過程中陸續加上去的，正式環境的資料庫如果是舊的，記得手動補`ALTER TABLE`，`init_db`只會處理全新建表的情況，不會自動幫既有資料表補欄位。
+
+如果是在既有資料庫上加新欄位（例如這次新增的 `redispatched_at`／`case_closed_at` 等），不要重跑 `init_db`（會漏掉ALTER TABLE），改用個別的migration腳本手動加欄位。
 
 ### 4. 啟動伺服器
 ```bash
@@ -101,29 +112,19 @@ uvicorn app.main:app --reload --port 8000
 ```bash
 ngrok http 8000
 ```
-ngrok免費版每次重啟網址都會換，記得同時更新兩個地方：
-- LINE Developers Console 的 **Webhook URL**（Messaging API分頁，記得加`/webhook`）
-- 對應Channel的 **LIFF Endpoint URL**（LIFF分頁，記得加`/liff/scan`，只填網域忘記加路徑是常見錯誤）
+將產生的網址設定到 LINE Developers 的 Webhook URL（記得加`/webhook`）。
+
+## 管理後台頁面
+
+啟動伺服器後可以直接訪問：
+- `http://localhost:8000/admin` — Dashboard主頁
+- `http://localhost:8000/admin/reports` — 每日報表
+- `http://localhost:8000/admin/exceptions` — 退回/作廢包裹處理
+- `http://localhost:8000/admin/residents` — 住戶綁定管理
 
 ## API 測試
 啟動伺服器後，開啟 `http://localhost:8000/docs` 可以互動測試所有API端點。
 
-## 已確認的機器人API（`ROBOT_API_BASE_URL`）
-
-| 用途 | 方法/路徑 | 說明 |
-|---|---|---|
-| 分配艙門 | `POST /api/doors/assign` | 回傳`door_number` |
-| 裝載艙門 | `POST /api/doors/load` | 派送前確認包裹已放入艙門 |
-| 派工 | `POST /api/robot/dispatch` | 單一目的地，帶`unit`/`package_id` |
-| 取貨開門 | `POST /api/packages/{id}/pickup-complete` | 掃碼驗證通過後開門 |
-| 取貨完成 | `POST /api/packages/{id}/complete` | 關門並釋放艙門；若所有艙門皆空，機器人自動觸發返航 |
-| 拒收/逾時關門 | `POST /api/packages/{id}/cancel` | 關門、關閉任務畫面，包裹仍保留在艙門內（維持full） |
-| 退回 | `POST /api/packages/return` | 退回包裹後釋放艙門，機器人送回管理室並開門 |
-| 管理員取件關門 | `POST /api/doors/return-complete` | 拿出被退回的包裹後關閉艙門 |
-| 即時狀態 | `GET /api/dashboard/status` | 位置、電量、艙門狀況（Dashboard輪詢用，注意實際資料在`robot_status.sources.v1/v2.data`底下，外層欄位不可靠） |
-
-## 需要跟其他模組（送貨機器人／管理員Dashboard）確認的事項
-1. 多包裹批次派送時，`/api/robot/dispatch`是否支援一次帶多個目的地，或是否需要我們自己依序呼叫單一目的地
-2. `/api/packages/return`同時有多筆包裹要退回時，一次呼叫是否會把所有還在艙門裡的都一起帶回來（目前假設是，尚待大量實測驗證）
-3. `robot_arrived`（`/packages/{id}/arrived`）目前由機器人模組在抵達時呼叫，實際串接是否已完全穩定
-4. Dashboard即時通知若要做成SSE，需要跟機器人模組確認事件推送的時機與方式
+## 需要跟機器人模組確認的事項
+1. 機器人回到管理室後的開門時機（見上方「需要機器人team配合」）
+2. Pudu API連線狀態與艙門即時狀態，目前是LINE後端主動呼叫 `/api/dashboard/status` 轉發給Dashboard顯示
