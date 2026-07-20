@@ -223,7 +223,7 @@ def reply_later_packages(reply_token: str, packages: list):
                 "color": "#06C755",
                 "action": {
                     "type": "postback",
-                    "label": "現在取",
+                    "label": "現在取貨",
                     "data": f"action=PICKUP_NOW&package_id={package.id}",
                 },
             })
@@ -234,7 +234,7 @@ def reply_later_packages(reply_token: str, packages: list):
                 "type": "box",
                 "layout": "vertical",
                 "contents": [
-                    {"type": "text", "text": f"📦 門牌：{package.unit}", "wrap": True},
+                    {"type": "text", "text": f"門牌：{package.unit}", "wrap": True},
                     {"type": "text", "text": f"登記時間：{package.created_at.strftime('%m/%d %H:%M')}", "size": "sm", "color": "#888888"},
                     {"type": "text", "text": status_text, "size": "sm", "color": "#029C4D", "wrap": True, "margin": "md"},
                 ],

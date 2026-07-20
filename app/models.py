@@ -10,6 +10,7 @@ from sqlalchemy.dialects.postgresql import UUID
 
 from app.db import Base
 
+
 TAIPEI_TZ = ZoneInfo("Asia/Taipei")
 
 
@@ -33,11 +34,18 @@ class Package(Base):
     # pending / pickup_now / delivering / arrived
     # / completed / returned_timeout / voided / rejected_at_door
     door_id = Column(String(10), nullable=True)                # 分配的艙門編號
+    door_assigned_at = Column(DateTime, nullable=True)          # 艙門分配（放置包裹開門）的時間，逾時判斷用
     arrived_at = Column(DateTime, nullable=True)                # 機器人抵達時間，逾時判斷用
+    returned_at = Column(DateTime, nullable=True)               # 機器人實際返回管理室的時間（拒收/逾時退回專用，門此時還沒開）
+    return_door_opened_at = Column(DateTime, nullable=True)     # 管理員按「開門」，機器人真的開門讓管理員取出包裹的時間
     door_closed_at = Column(DateTime, nullable=True)            # 拒收後管理員取出包裹、按關門的時間
     acknowledged_at = Column(DateTime, nullable=True)            # 不收(voided)的包裹，管理員按「確定」已知悉的時間
+    redispatched_at = Column(DateTime, nullable=True)            # 已重新派送的時間（例外處理頁按下「重新派貨」）
+    redispatched_to = Column(UUID(as_uuid=True), nullable=True)  # 重新派送後，新建立的包裹ID
+    pending_pickup_notified_at = Column(DateTime, nullable=True)  # 例外處理頁「通知住戶」的時間，只能通知一次
     created_at = Column(DateTime, default=now_taipei)
     updated_at = Column(DateTime, default=now_taipei, onupdate=now_taipei)
+    case_closed_at = Column(DateTime, nullable=True)
 
 
 class LineBinding(Base):
@@ -73,7 +81,13 @@ class TaskLog(Base):
     # created / rejected / rejected_at_door / door_assigned / door_assign_failed / dispatched / dispatch_failed
     # / arrived / pickup_opened / pickup_open_failed / completed / complete_failed
     # / returned_timeout / returned / cancel_task_failed / returned_and_opened / return_failed
-    # / door_closed / close_door_failed / notify_failed / voided_acknowledged
+    # / door_closed / close_door_failed / notify_failed / voided_acknowledged / redispatched / case_closed
+    # / line_binding_deleted / return_door_opened / return_door_open_failed / pending_pickup_notified
+    # / pickup_requested / trip_completed / user_unfollowed
+    # / robot_recharge_requested / robot_recharge_failed
+    # / assign_timeout / assign_timeout_failed / return_timeout / return_timeout_failed
+    # / poll_returned_failed
+    # / force_resolved
     level = Column(String(10), nullable=False, default="info")  # info / warning / error
     detail = Column(String(500), nullable=True)
     created_at = Column(DateTime, default=now_taipei)

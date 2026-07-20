@@ -23,6 +23,8 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "postgresql://user:password@localhost:5432/aurobox_line"
     APP_ENV: str = "development"
 
+    ROBOT_HOME_POINT_NAME: str = "office"  # 機器人「在家」時current_location的字串，用來判斷退回是否已抵達
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
