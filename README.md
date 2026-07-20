@@ -3,6 +3,7 @@
 Aurobox 是一個聚焦在 Pudu Flashbot 的硬體控制層，提供對外 HTTP API 讓中央系統可進行派車、艙門控制與狀態查詢。
 
 目前版本重點是「最小本地狀態 + 外部中控整合」，不包含完整住戶互動流程、前端 Dashboard 或 LINE webhook。
+本次重大更新導入 PostgreSQL 與行級悲觀鎖（Row-level Lock），確保在多執行緒與高併發環境下不會發生艙門超賣（Overbooking）的競態條件。
 
 ## 目前定位
 
@@ -16,7 +17,7 @@ Aurobox 是一個聚焦在 Pudu Flashbot 的硬體控制層，提供對外 HTTP 
 ```mermaid
 flowchart LR
   Central[中央系統] --> API[Flask API]
-  API --> DB[(SQLite: doors, robot_state)]
+  API --> DB[(PostgreSQL: doors, robot_state)]
   API --> CTRL[FlashbotController]
   CTRL --> PUDU[Pudu Open Platform]
   PUDU --> ROBOT[Flashbot]
@@ -42,6 +43,7 @@ scripts/
 └── read_maps_and_position.py
 
 tests/
+├── load_test.py
 ├── test_api_integration.py
 └── test_pudu_client.py
 
@@ -67,36 +69,60 @@ REPORT.md
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-```
+# Windows PowerShell: .venv\Scripts\Activate.ps1
 
-Windows PowerShell:
-
-```powershell
-.venv\Scripts\Activate.ps1
-```
-
-2. 安裝套件
-
-```bash
 python -m pip install -e .
+# 若要安裝開發與測試工具： python -m pip install -e ".[dev]"
 ```
 
-若要安裝開發與測試工具：
+2. 資料庫建置 (PostgreSQL)
+本專案強烈依賴 PostgreSQL 來處理高併發的硬體控制請求。請依照以下任一方式建置本地端資料庫：
 
+選項 A：使用 Docker 快速啟動（推薦）
 ```bash
-python -m pip install -e ".[dev]"
+docker run --name aurobox-postgres \
+  -e POSTGRES_USER=myuser \
+  -e POSTGRES_PASSWORD=mypassword \
+  -e POSTGRES_DB=aurobox_db \
+  -p 5432:5432 \
+  -d postgres:15
+```
+選項 B：Linux 原生安裝 (Ubuntu/Debian)
+```bash
+sudo apt update
+sudo apt install postgresql postgresql-contrib
+sudo systemctl start postgresql
+sudo systemctl enable postgresql
+
+# 進入控制台建立帳號與資料庫
+sudo -u postgres psql
+
+# 執行以下 SQL (請在 psql 提示字元下執行)：
+CREATE USER myuser WITH PASSWORD 'mypassword';
+CREATE DATABASE aurobox_db;
+GRANT ALL PRIVILEGES ON DATABASE aurobox_db TO myuser;
+ALTER DATABASE aurobox_db OWNER TO myuser;
+\c aurobox_db
+GRANT ALL ON SCHEMA public TO myuser;
+\q
 ```
 
 3. 建立 `.env`
 
 ```env
+# Pudu API 憑證與機器人設定
 Pd_key=YOUR_PUDU_API_KEY
 Pd_secret=YOUR_PUDU_API_SECRET
 Aurotek_id=YOUR_SHOP_ID
 FLASHBOT_SN=8FF055923050007
 DEFAULT_MAP_NAME=YOUR_MAP_NAME
 HOME_POINT_NAME=閃閃充電
-CENTRAL_API_BASE_URL=https://your-central-api.example.com
+
+# 資料庫連線 (對應步驟 2 的設定)
+DATABASE_URL=postgresql://myuser:mypassword@localhost:5432/aurobox_db
+
+# 中控系統連線
+CENTRAL_API_BASE_URL=[https://your-central-api.example.com](https://your-central-api.example.com)
 ```
 
 4. 啟動服務
@@ -104,6 +130,7 @@ CENTRAL_API_BASE_URL=https://your-central-api.example.com
 ```bash
 python3 -u run.py --debug 2>&1 | tee -a instance/aurobox.log
 ```
+如需外網穿透測試，可使用 `ngrok http 5000`
 
 預設監聽：`http://0.0.0.0:5000`
 
@@ -116,28 +143,33 @@ python3 -u run.py --debug 2>&1 | tee -a instance/aurobox.log
 
 硬體流程：
 
-- `POST /api/doors/assign`
-  - 參數：`{ "id": "<package_id>" }`
-  - 行為：找空艙門、呼叫機器人回管理室、背景輪詢抵達後開門。
-- `POST /api/doors/load`
-  - 參數：`{ "id": "<package_id>" }`
-  - 行為：關門，狀態從 `assigned` 轉 `full`。
-- `POST /api/robot/dispatch`
-  - 參數：`point`（或相容舊欄位 `unit`）、可選 `map_name`、`point_type`、`package_id`。
-  - 行為：派遣機器人到指定點位，若有 `package_id` 會背景輪詢並通知中央系統抵達。
-- `POST /api/packages/<package_id>/pickup-complete`
-  - 行為：關閉任務畫面（若有 task_id）並開啟對應艙門。
-- `POST /api/packages/<package_id>/complete`
-  - 行為：關門並釋放艙門；若所有艙門皆空，觸發返航。
-- `POST /api/packages/<package_id>/cancel`
-  - 行為：關門、關閉任務畫面，包裹仍保留在艙門內（維持 `full`）。
-- `POST /api/packages/return`
-  - 行為：退回包裹後釋放艙門。
-- `POST /api/doors/return-complete`
-  - 行為：拿出被退回的包裹後關閉艙門。
-- `GET /api/dashboard/status`
+- `POST /api/robot/recharge`​ #增
+  - 行為：​呼叫機器人回充電站。
+- `POST /api/packages/<package_id>/assign`​ #改
+  - 行為：找空艙門 (具備行級防超賣鎖)、呼叫機器人回管理室、背景輪詢抵達後開門。
+- `POST /api/packages/<package_id>/assign-timeout`​ #增
+  - 行為：空艙門打開後並沒有關門，視為未放貨(仍為EMPTY)。
+- `POST /api/doors/load`​
+  - 行為：關門，狀態從 `assigned` 轉 `full`。​
+- `POST /api/robot/dispatch`​
+  - 行為：派遣機器人到指定點位，背景輪詢並通知中央系統抵達、顯示QR Code。​
+- `POST /api/packages/<package_id>/pickup-complete`​
+  - 行為：關閉QR Code畫面並開啟對應艙門。​
+- `POST /api/packages/<package_id>/complete`​
+  - 行為：關門並清空艙門；若所有艙門皆空，觸發返航。​
+- `POST /api/packages/<package_id>/cancel`​
+  - 行為：關門、關閉任務畫面，包裹仍保留在艙門內（維持 `full`）。​
+- `POST /api/packages/return`​
+  - 行為：退回包裹回到管理室。​
+- `POST /api/packages/return-open`​
+  - 行為：回到管理室後釋放艙門。​
+- `POST /api/doors/return-complete`​
+  - 行為：拿出被退回的包裹後關閉艙門。​
+- `POST /api/doors/return-timeout`​ #增
+  - 行為：退貨開門後並沒有關門，視為已拿出貨(EMPTY)  。
+- `GET /api/dashboard/status`​ (已停用)
   - 行為：回傳機器人即時狀態摘要與本地艙門狀態。
-
+  
 ## CLI
 
 ```bash
@@ -181,5 +213,5 @@ pytest -q
 
 ## 版本資訊
 
-- 套件版本：`0.2.1`
+- 套件版本：`0.3.0`
 - 本次盤點報告：`REPORT.md`

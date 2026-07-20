@@ -51,7 +51,7 @@ class RobotState(db.Model):
 
     id = db.Column(db.Integer, primary_key=True)
     sn = db.Column(db.String(50), unique=True, nullable=False)
-    last_point = db.Column(db.String(100), nullable=True, default="管理室") 
+    last_point = db.Column(db.String(100), nullable=True, default="")
     
     updated_at = db.Column(db.DateTime, default=_utc_now_naive, onupdate=_utc_now_naive)
 

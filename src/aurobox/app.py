@@ -3,7 +3,11 @@
 import os
 from flask import Flask, jsonify
 from .models import db, Door, DoorStatus
+from .services import FlashbotController
 from .config import load_config
+from .api import api_bp
+from .tasks import _push_dashboard_status_loop
+import threading
 
 DEFAULT_DOOR_NUMBERS = ("H_01", "H_02", "H_03", "H_04")  # 預設艙門號碼，請依實際硬體調整
 
@@ -46,12 +50,19 @@ def ensure_default_doors(app: Flask) -> None:
 def create_app(config=None, reset_db=True):
     """Create and configure Flask app."""
     app = Flask(__name__)
+    app_config = config or load_config()
     
     # 配置資料庫
-    db_path = os.path.join(os.path.dirname(__file__), '..', '..', 'instance')
-    os.makedirs(db_path, exist_ok=True)
+    db_url = app_config.get('DATABASE_URL')
+    if db_url:
+        # 如果有設定 PostgreSQL，就用它
+        app.config['SQLALCHEMY_DATABASE_URI'] = db_url
+    else:
+        # 否則退回 SQLite (相容舊版開發環境)
+        db_path = os.path.join(os.path.dirname(__file__), '..', '..', 'instance')
+        os.makedirs(db_path, exist_ok=True)
+        app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{db_path}/aurobox.db'
     
-    app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{db_path}/aurobox.db'
     app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
     app.config['JSON_AS_ASCII'] = False
     
@@ -63,7 +74,12 @@ def create_app(config=None, reset_db=True):
     app.config['ROBOT_SN'] = app_config.get('DEFAULT_SN')
     app.config['DEFAULT_MAP_NAME'] = app_config.get('DEFAULT_MAP_NAME')
     app.config['HOME_POINT_NAME'] = app_config.get('HOME_POINT_NAME')
+    app.config['CHARGE_POINT_NAME'] = app_config.get('CHARGE_POINT_NAME')
     app.config['CENTRAL_API_BASE_URL'] = app_config.get('CENTRAL_API_BASE_URL')
+
+    app.pudu_controller = FlashbotController(app_config)
+    app.home_point = app_config.get('HOME_POINT_NAME')
+    app.charge_point = app_config.get('CHARGE_POINT_NAME')
 
     # 初始化資料庫
     db.init_app(app)
@@ -75,9 +91,14 @@ def create_app(config=None, reset_db=True):
             ensure_default_doors(app)
     
     # 註冊 API 藍圖 (不再註冊 webhooks)
-    from .api import api_bp
-    
     app.register_blueprint(api_bp, url_prefix='/api')
+
+    push_thread = threading.Thread(
+        target=_push_dashboard_status_loop,
+        args=(app,), 
+        daemon=True # 設定 daemon=True，這樣 Flask 關閉時執行緒也會跟著乾淨關閉
+    )
+    push_thread.start()
 
     @app.get('/')
     def index():

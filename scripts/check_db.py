@@ -8,7 +8,7 @@ sys.path.insert(0, str(src_path))
 
 from aurobox.app import create_app
 from aurobox.config import load_config
-from aurobox.models import db, Door, DoorStatus
+from aurobox.models import db, Door, DoorStatus, RobotState
 
 def main():
     # 初始化 Flask 環境
@@ -26,9 +26,24 @@ def main():
         else:
             print(f"目前共有 {len(doors)} 個艙門：")
             for door in doors:
-                print(f" - 門號: {door.door_number} | 狀態: {door.status} | 綁定包裹: {door.package_id}")
+                print(f" - 門號: {door.door_number} | 狀態: {door.status} | 綁定包裹: {door.package_id} | Task: {door.task_id}")
+        
+        print("-" * 50)
+
+        print("正在查詢資料庫中的【機器人狀態】...")
+        robot_states = RobotState.query.all()
+        
+        if not robot_states:
+            print("目前沒有機器人狀態記錄 (可能是尚未發送過任何導航指令)。")
+        else:
+            for state in robot_states:
+                # 格式化時間輸出
+                time_str = state.updated_at.strftime('%Y-%m-%d %H:%M:%S') if state.updated_at else 'N/A'
+                print(f" - 機器人 SN: {state.sn}")
+                print(f" - 最後紀錄點位: {state.last_point}")
+                print(f" - 資料更新時間: {time_str}")
                 
-        print("="*40)
+        print("="*50)
 
 if __name__ == '__main__':
     main()

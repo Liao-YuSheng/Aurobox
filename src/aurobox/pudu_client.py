@@ -287,35 +287,6 @@ class PuduApiClient:
             {"sn": sn},
         )
     
-    def control_doors(self, sn: str, door_number: str, operation: bool) -> dict:
-        """
-        控制單一艙門的開關。
-        Pudu endpoint expects control states under payload.control_states.
-        :param door_number: 艙門編號 (例如 "H_01", "H_02")
-        :param operation: True 打開, False 關閉
-        """
-        payload = {
-            "sn": sn,
-            "payload": {
-                "control_states": [
-                    {
-                        "operation": operation,
-                        "door_number": door_number,
-                    }
-                ]
-            }
-        }
-        try:
-            result = self._post(
-                "/pudu-entry/open-platform-service/v1/control_doors",
-                payload,
-            )
-            self._log_robot_instruction("control_doors", payload, result)
-            return result
-        except Exception as e:
-            self._log_robot_instruction_error("control_doors", payload, e)
-            raise
-
     def custom_content(self, payload: dict) -> dict:
         try:
             result = self._post(
@@ -338,4 +309,26 @@ class PuduApiClient:
             return result
         except Exception as e:
             self._log_robot_instruction_error("custom_complete", payload, e)
+            raise
+
+    def control_doors(self, sn: str, control_states: list) -> dict:
+        """
+        批次控制多個艙門的開關。
+        :param control_states: 包含多個 dict 的列表，例如 [{"operation": False, "door_number": "H_01"}, ...]
+        """
+        payload = {
+            "sn": sn,
+            "payload": {
+                "control_states": control_states
+            }
+        }
+        try:
+            result = self._post(
+                "/pudu-entry/open-platform-service/v1/control_doors",
+                payload,
+            )
+            self._log_robot_instruction("control_doors", payload, result)
+            return result
+        except Exception as e:
+            self._log_robot_instruction_error("control_doors", payload, e)
             raise

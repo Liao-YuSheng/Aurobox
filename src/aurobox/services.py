@@ -22,6 +22,8 @@ def set_robot_target_point(sn: str, point: str):
 
 def check_and_return_home_if_empty():
     """檢查是否所有艙門都為 EMPTY，若是則命令機器人返回管理室"""
+    controller = current_app.pudu_controller
+    home_point = current_app.home_point
     sn = current_app.config.get('ROBOT_SN')
     
     # 尋找還有貨(不等於 EMPTY)的門
@@ -31,10 +33,18 @@ def check_and_return_home_if_empty():
     ).count()
     
     if non_empty_doors == 0:
-        controller = get_controller()
-        home_point = current_app.config.get('HOME_POINT_NAME')
-        payload = build_custom_call_payload(sn=sn, point=home_point)
-        controller.custom_call2(payload=payload)
+
+        # 加上狀態檢查，避免原地轉圈
+        live_status = controller.get_status_summary(sn)
+        is_already_home = (
+            live_status.get('current_location') == home_point and 
+            live_status.get('move_state') in ['IDLE', 'ARRIVE']
+        )
+
+        if not is_already_home:
+            payload = build_custom_call_payload(sn=sn, point=home_point)
+            controller.custom_call2(payload=payload)
+            
         set_robot_target_point(sn, home_point)
         return True
     return False

@@ -19,8 +19,10 @@ def load_config():
         "SHOP_ID": os.getenv("Aurotek_id"),
         "DEFAULT_SN": os.getenv("FLASHBOT_SN", "8FF055923050007"),
         "DEFAULT_MAP_NAME": os.getenv("DEFAULT_MAP_NAME", ""),
-        "HOME_POINT_NAME": os.getenv("HOME_POINT_NAME", "閃閃充電"),
+        "HOME_POINT_NAME": os.getenv("HOME_POINT_NAME", "office"),
+        "CHARGE_POINT_NAME": os.getenv("CHARGE_POINT_NAME", "閃閃充電"),
         "CENTRAL_API_BASE_URL": os.getenv("CENTRAL_API_BASE_URL", ""),
+        "DATABASE_URL": os.getenv("DATABASE_URL", ""),
     }
 
 

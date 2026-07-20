@@ -1,8 +1,8 @@
 # Aurobox 全目錄盤點報告
 
-完成日期: 2026-07-15  
-版本: 0.2.1  
-狀態: 已完成文件同步與 API 整合測試補齊
+完成日期: 2026-07-17  
+版本: 0.3.0  
+狀態: 已完成 PostgreSQL 遷移與高併發防超賣架構升級
 
 ## 1. 本次工作範圍
 
@@ -14,7 +14,7 @@
 - run.py、pyproject.toml
 - 既有文件（README.md、REPORT.md、docs 目錄）
 
-目的：將 0.2.1 文件內容與實際程式行為對齊，並反映已完成修正項目。
+目的：將文件內容與實際程式行為對齊，並反映由 SQLite 遷移至 PostgreSQL 以及解決高併發競態條件（Race Condition）的重大修正項目。
 
 ## 2. 程式現況總結
 
@@ -30,13 +30,13 @@
 
 ### 2.2 主要模組
 
-- app.py: App factory、DB 初始化、預設四個艙門重置
-- api.py: 對外流程 API（assign/load/dispatch/pickup-complete/complete/cancel/return/status）
+- app.py: App factory、DB 初始化、**單例模式綁定控制器**與預設四個艙門重置
+- api.py: 對外流程 API，**包含防超賣 (Overbooking) 的行級鎖邏輯**
 - robot.py: FlashbotController 與多來源狀態整合
-- pudu_client.py: HMAC 簽章、GET/POST 包裝、指令紀錄
+- pudu_client.py: HMAC 簽章、GET/POST 包裝、指令紀錄，**並統整為批次陣列控制 (`control_doors`)**
 - models.py: Door、RobotState 與資料約束
-- services.py: Controller 取得、目標點記錄、全空返航
-- tasks.py: 背景輪詢抵達、通知中央系統、顯示 QR 內容
+- services.py: Controller 取得、目標點記錄、全空返航 (新增防原地轉圈邏輯)
+- tasks.py: 背景輪詢抵達、通知中央系統、顯示 QR 內容，**完善全域佇列與雙重檢查鎖**
 - cli.py: CLI 子命令封裝
 
 ## 3. API 現況（依實際路由）
@@ -60,7 +60,7 @@
 
 ## 4. 資料層現況
 
-SQLite 使用 instance/aurobox.db。
+**已正式遷移至 PostgreSQL**，取代原有的 SQLite (instance/aurobox.db)，以支援高併發與行級鎖 (Row-level Lock)。
 
 資料表：
 
@@ -88,32 +88,33 @@ SQLite 使用 instance/aurobox.db。
   - complete（釋放艙門）
   - cancel（保留 FULL 並清 task_id）
 
-### 5.2 本次執行結果
+### 5.2 壓力測試 (Load Test)
 
-在目前工作環境執行 pytest：
-
-- 結果：8 passed
-- 耗時：約 0.40s
-- 備註：原先 SQLAlchemy datetime.utcnow() deprecation warning 已修正。
+- 已撰寫並執行 20 執行緒瞬間併發腳本 (`load_test.py`)。
+- 測試結果：成功
+  瞬間發起 20 個請求
+  成功分配 (200): 4 (請求01~04)
+  擋車或無空門 (400/409): 16 (請求05~20，皆為400)
 
 ## 6. 差異與修正狀態
 
-- 舊的路由參數不一致問題：已解決
-- 舊文件與實作不同步風險：已透過 README/REPORT 更新對齊
+- **架構安全性**：已移除全域變數，改用 Flask `current_app` 綁定單例控制器。
+- **硬體保護機制**：已修正批次裝貨時被導航指令強制關門的韌體衝突。
+- **資料庫鎖死**：透過 PostgreSQL 取代 SQLite，解決多執行緒背景任務與 API 請求交錯造成的崩潰。
 
 ## 7. 本次文件更新成果
 
 - 已更新 README.md：
-  - 測試章節加入 API 整合測試資訊
-  - 已知問題改為目前無阻擋性問題
-  - 版本資訊更新為 0.2.1
+  - 加入 PostgreSQL Docker 與 Linux 本機建置教學。
+  - 更新環境需求 (新增 `psycopg2-binary`)。
+  - 版本資訊更新為 0.3.0。
 - 已更新 REPORT.md（本文件）：
-  - 以 2026-07-15 現況為基準
-  - 記錄新增 API 整合測試與實測結果
+  - 記錄資料庫遷移與高併發架構升級實測結果。
 
 ## 8. 建議下一步
 
-1. 以 `python -m pip install -e ".[dev]"` 作為新環境標準安裝流程。
-2. 視需求擴充整合測試到 return / return-complete / dashboard/status。
-3. 評估加入 CI 自動執行 pytest，確保後續改動不回歸。
+1. 準備生產環境的部署管線 (Deployment Pipeline)，建議導入 **Gunicorn** 搭配 **Nginx** 作為反向代理。
+2. 考慮將整個 Flask 應用程式 Docker 化，以統一開發與正式上線的環境。
+3. 視需求擴充整合測試到 return / return-complete / dashboard/status。
+4. 評估加入 CI 自動執行 pytest，確保後續改動不回歸。
 

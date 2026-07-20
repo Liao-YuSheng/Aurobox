@@ -185,9 +185,6 @@ class FlashbotController:
                 payload.setdefault("map_name", map_name or self.default_map_name)
 
         return self.client.custom_call2(payload)
-    
-    def control_doors(self, sn: str | None, door_number: str, operation: bool) -> dict:
-        return self.client.control_doors(sn or self.default_sn, door_number, operation)
 
     def custom_content(self, payload: dict | None = None, **kwargs) -> dict:
         """Forward custom content payload to Pudu API (for screen customization, etc.)."""
@@ -199,7 +196,7 @@ class FlashbotController:
 
         return self.client.custom_content(payload)
 
-    def wait_until_arrived(self, sn: str | None = None, timeout_seconds: int = 300, poll_interval: int = 3) -> bool:
+    def wait_until_arrived(self, sn: str | None = None, timeout_seconds: int = 3000, poll_interval: int = 3) -> bool:
         """
         輪詢監控機制：每隔 poll_interval 秒詢問一次，直到機器人抵達定點 (IDLE or ARRIVE)。
         """
@@ -225,3 +222,6 @@ class FlashbotController:
             
         print("[系統] ⚠️ 輪詢超時，機器人可能卡在路上了！")
         return False
+    
+    def control_doors(self, sn: str | None, control_states: list) -> dict:
+        return self.client.control_doors(sn or self.default_sn, control_states)
