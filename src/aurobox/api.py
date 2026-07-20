@@ -72,18 +72,12 @@ def robot_recharge():
 # ==========================================================
 # 1. 分派空艙門並為管理員開門 (Assign & Open)
 # ==========================================================
-@api_bp.route('/doors/assign', methods=['POST'])
-def assign_door_for_package():
+@api_bp.route('/packages/<package_id>/assign', methods=['POST'])
+def assign_door_for_package(package_id):
     """
     中央大腦通知：管理員準備裝載包裹。
     【本機動作】：尋找空艙門 -> 將機器人叫回管理室(若不在) -> 打開該艙門。
     """
-    data = request.get_json()
-    package_id = data.get('id') or data.get('package_id')
-    
-    if not package_id:
-        return jsonify({'error': 'package_id is required'}), 400
-        
     controller = current_app.pudu_controller
     home_point = current_app.home_point
     sn = current_app.config.get('ROBOT_SN')
@@ -158,18 +152,12 @@ def assign_door_for_package():
 # ==========================================================
 # 1.5 管理員裝載逾時 (Assign Timeout)
 # ==========================================================
-@api_bp.route('/packages/assign-timeout', methods=['POST'])
-def package_assign_timeout():
+@api_bp.route('/packages/<package_id>/assign-timeout', methods=['POST'])
+def package_assign_timeout(package_id):
     """
     中央大腦通知：分派空艙門後，管理員超過 5 分鐘未放貨。
     【本機動作】：尋找對應的 ASSIGNED 艙門 -> 關門 -> 將狀態清空為 EMPTY。
     """
-    data = request.get_json()
-    package_id = data.get('id') or data.get('package_id')
-    
-    if not package_id:
-        return jsonify({'error': 'package_id is required'}), 400
-    
     controller = current_app.pudu_controller
     sn = current_app.config.get('ROBOT_SN')
     

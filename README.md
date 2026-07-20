@@ -148,7 +148,7 @@ python3 -u run.py --debug 2>&1 | tee -a instance/aurobox.log
 - `POST /api/packages/<package_id>/assign`​ #改
   - 行為：找空艙門 (具備行級防超賣鎖)、呼叫機器人回管理室、背景輪詢抵達後開門。
 - `POST /api/packages/<package_id>/assign-timeout`​ #增
-  - 行為：空艙門打開後並沒有關門，視為未放貨(仍為EMPTY)。
+  - 行為：空艙門打開後並沒有關門，視為未放貨，自動關門(仍為`empty`)。
 - `POST /api/doors/load`​
   - 行為：關門，狀態從 `assigned` 轉 `full`。​
 - `POST /api/robot/dispatch`​
@@ -166,7 +166,7 @@ python3 -u run.py --debug 2>&1 | tee -a instance/aurobox.log
 - `POST /api/doors/return-complete`​
   - 行為：拿出被退回的包裹後關閉艙門。​
 - `POST /api/doors/return-timeout`​ #增
-  - 行為：退貨開門後並沒有關門，視為已拿出貨(EMPTY)  。
+  - 行為：退貨開門後並沒有關門，視為還沒拿貨，自動關門(維持 `full`)。
 - `GET /api/dashboard/status`​ (已停用)
   - 行為：回傳機器人即時狀態摘要與本地艙門狀態。
   
