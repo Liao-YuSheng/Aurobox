@@ -9,7 +9,8 @@ import requests
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.responses import PlainTextResponse, HTMLResponse
 from sqlalchemy.orm import Session
-from pydantic import BaseModel
+from sqlalchemy.exc import OperationalError
+from pydantic import BaseModel, Field
 
 from linebot.v3 import WebhookParser
 from linebot.v3.exceptions import InvalidSignatureError
@@ -26,7 +27,7 @@ from app.line_messaging import (
     push_status_update,
     push_arrived_notification,
     push_pickup_complete_button,
-    reply_later_packages,
+    reply_my_packages_text,
 )
 from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -41,7 +42,7 @@ async def health_check():
 
 
 USAGE_INSTRUCTIONS_TEXT = (
-    "📖 使用說明\n"
+    "使用說明\n"
     "\n"
     "【綁定門牌】\n"
     "在此聊天室輸入「門牌 姓名」完成綁定\n"
@@ -53,7 +54,7 @@ USAGE_INSTRUCTIONS_TEXT = (
     "3. 取出包裹後，按下「取貨完成」即可\n"
     "\n"
     "【查詢包裹】\n"
-    "輸入「我的包裹」或「現在取貨」可查看目前所有包裹狀態，待處理的包裹可直接按鈕取貨\n"
+    "輸入「我的包裹」可查看目前所有包裹狀態（純文字列表）\n"
     "\n"
     "【通知設定】\n"
     "輸入「開啟限本人通知」：包裹到貨只通知您本人\n"
@@ -110,12 +111,12 @@ async def line_webhook(request: Request):
 
         elif isinstance(event, PostbackEvent):
             print(f"[postback] user_id={event.source.user_id}, data={event.postback.data}")
-            handle_postback(event.postback.data, event.reply_token, event.source.user_id)
+            handle_postback(event.postback.data, event.reply_token, event.source.user_id, event.postback.params)
 
         elif isinstance(event, MessageEvent):
             if isinstance(event.message, TextMessageContent):
                 text = event.message.text.strip()
-                if text in ("我的包裹", "現在取貨"):
+                if text == "我的包裹":
                     handle_my_packages_query(event.source.user_id, event.reply_token)
                 elif text == "開啟限本人通知":
                     handle_solo_notify_toggle(event.source.user_id, event.reply_token, True)
@@ -173,27 +174,97 @@ def handle_text_binding(line_user_id: str, text: str, reply_token: str):
 
 
 def handle_my_packages_query(line_user_id: str, reply_token: str):
+    """
+    「我的包裹」：純文字列出所有還沒真正結束的包裹狀態，不附任何按鈕。
+    這裡刻意把退回（拒收/逾時未取）跟不收也納入查詢範圍——住戶需要知道
+    自己有包裹被退回、還剩多久會作廢，不能因為狀態進了例外流程就從清單消失。
+    真正要排除的只有：completed（已完成）、case_closed_at有值（管理員已經銷案）、
+    redispatched_at有值（已經重新派送成一筆新包裹，這筆舊的不用再顯示）。
+    要對包裹採取動作（取貨/預約取貨/不收），請至該筆包裹的到貨通知訊息
+    點選對應按鈕，這裡純粹是查詢用途。
+    """
     db = SessionLocal()
     try:
         packages = (
             db.query(Package)
             .filter(
                 Package.line_user_id == line_user_id,
-                Package.status.notin_(["completed", "returned_timeout", "voided", "rejected_at_door"]),
+                Package.status != "completed",
+                Package.case_closed_at.is_(None),
+                Package.redispatched_at.is_(None),
             )
+            .order_by(Package.created_at)
             .all()
         )
         if not packages:
-            reply_text(reply_token, "目前沒有待取包裹")
+            reply_text(reply_token, "目前無待取貨包裹")
         else:
-            reply_later_packages(reply_token, packages)
+            reply_my_packages_text(reply_token, packages)
     finally:
         db.close()
+
 
 def get_recipients(db: Session, package_id: str) -> list:
     """查詢這筆包裹當初通知過的所有LINE User ID"""
     rows = db.query(PackageRecipient).filter(PackageRecipient.package_id == package_id).all()
     return [row.line_user_id for row in rows]
+
+
+def send_pending_pickup_notification(db: Session, package: Package) -> dict:
+    """
+    推播「包裹因故未能送達，暫存於管理室，超過72小時管理員將作廢」提醒給收件人。
+    只要是被退回（拒收/逾時）或不收（作廢）的包裹，狀態一轉進去就會自動呼叫這支，
+    不用等管理員手動點——例外處理頁的「通知住戶」按鈕保留下來當補發用
+    （例如自動發送當下推播失敗，管理員可以再手動觸發一次）。
+
+    只會真的送一次：package.pending_pickup_notified_at有值就直接跳過，
+    回傳{"sent": True, "already_notified": True}代表「這次呼叫沒做事，之前已經發過了」，
+    不是錯誤，呼叫端不用特別處理。
+    """
+    if package.pending_pickup_notified_at is not None:
+        return {"sent": True, "already_notified": True, "notified_count": 0, "notify_failed_count": 0}
+
+    recipients = get_recipients(db, str(package.id))
+    if not recipients:
+        return {"sent": False, "already_notified": False, "notified_count": 0, "notify_failed_count": 0}
+
+    if package.status == "voided":
+        # voided是住戶在到貨通知當下就直接按不收，包裹從沒出過門，
+        # 不是「送去才被退回」，用「限期領取否則作廢」的說法邏輯上矛盾（都已經說不要了），
+        # 改成單純告知包裹會留存、如果之後改主意要拿再聯繫管理員，沒有期限壓力。
+        message = (
+            f"您方才取消收件的包裹（門牌：{package.unit}）將留存於管理室，"
+            "如需取回請聯繫管理員協助處理。"
+        )
+    else:
+        message = (
+            f"您有一筆包裹（門牌：{package.unit}）因故未能送達，目前暫存於管理室，"
+            "請盡快聯繫管理員領取。若超過72小時仍未領取，管理員將會把包裹作廢處理。"
+        )
+
+    notify_failed_count = 0
+    for line_user_id in recipients:
+        try:
+            push_status_update(line_user_id, message)
+        except Exception as e:
+            notify_failed_count += 1
+            log_event(db, "notify_failed", detail=f"未取包裹提醒通知失敗: {e}", package_id=package.id, level="error")
+
+    package.pending_pickup_notified_at = now_taipei()
+    db.commit()
+
+    log_event(
+        db, "pending_pickup_notified",
+        detail=f"通知 {len(recipients) - notify_failed_count}/{len(recipients)} 位收件人",
+        package_id=package.id,
+    )
+
+    return {
+        "sent": True,
+        "already_notified": False,
+        "notified_count": len(recipients) - notify_failed_count,
+        "notify_failed_count": notify_failed_count,
+    }
 
 
 def get_recipients_with_names(db: Session, package_id: str) -> list:
@@ -273,14 +344,30 @@ def advance_trip_or_return(db: Session):
     拒收/逾時用 /cancel 關門，艙門會保持「滿」，機器人不會自動返航，這種情況才需要我們
     主動呼叫 /api/packages/return 把這些包裹一起帶回管理室、開門給管理員取出。
     """
-    next_package = (
-        db.query(Package)
-        .filter(Package.status == "delivering")
-        .order_by(Package.door_id)
-        .first()
-    )
+    # 用 with_for_update(nowait=True) 鎖住查詢：nowait代表鎖不到就立刻丟例外、不會傻等，
+    # 因為handle_postback/advance_trip_or_return是一般的def、在async的webhook handler裡
+    # 直接被呼叫（沒有丟進背景執行緒池），如果用一般的with_for_update()傻等鎖，
+    # 等待期間會卡住整個uvicorn的事件迴圈，導致同一時間點進來的其他所有請求
+    # （包括完全無關的包裹）都被卡住逾時，反而造成更大範圍的服務中斷。
+    # 鎖不到就直接跳過：代表已經有另一個並發呼叫在處理同一批次的下一站了，
+    # 讓那個呼叫處理就好，這裡不用等、也不用重複做。
+    try:
+        next_package = (
+            db.query(Package)
+            .filter(Package.status == "delivering", Package.stop_dispatched_at.is_(None))
+            .order_by(Package.door_id)
+            .with_for_update(nowait=True)
+            .first()
+        )
+    except OperationalError:
+        db.rollback()
+        log_event(db, "dispatch_failed", detail="下一站包裹正被其他並發請求鎖住，本次跳過交給對方處理", level="warning")
+        return
 
     if next_package:
+        next_package.stop_dispatched_at = now_taipei()
+        db.commit()
+
         ok, resp, error = call_robot_api(
             "POST", "/api/robot/dispatch",
             json={"unit": next_package.unit, "package_id": str(next_package.id)},
@@ -352,34 +439,117 @@ def call_robot_api(method: str, path: str, json: dict = None, timeout: int = 5, 
         last_error = f"HTTP {resp.status_code}: {resp.text}"
     return False, last_resp, last_error
 
-def try_assign_door(package_id: str, db: Session) -> bool:
+def try_assign_door(package_id: str, db: Session) -> tuple:
     """
-    嘗試跟機器人要一個空艙門，成功會把door_id存進package並回傳True。
+    嘗試跟機器人要空艙門，成功會把door_id存進package並回傳(True, False)。
     新版assign路徑改成package_id放在路徑上（不是body），
     行為也擴增為「找空艙門、呼叫機器人回管理室、背景輪詢抵達後開門」，
     但「背景輪詢」暗示機器人那邊是非同步處理，這支API應該很快就回應，
     不是等機器人真的開到門開好才回來——這裡先維持預設timeout，
     如果實測發現這支API回應變慢（代表其實是同步等待），再回來調整。
-    """
-    ok, resp, error = call_robot_api("POST", f"/api/packages/{package_id}/assign")
-    if not ok:
-        log_event(db, "door_assign_failed", detail=error, package_id=package_id, level="error")
-        return False
 
-    door_number = resp.json().get("door_number")
+    機器人端這支現在有「行級悲觀鎖」防超賣機制，四個艙門都在用時會回400/409，
+    這是完全正常、預期中的情況（例如同時有5筆包裹要送，前4筆先佔滿艙門，
+    第5筆本來就該等前面送完、艙門釋放才能派），不是機器人故障，
+    所以這裡特別把這種情況跟真正的連線失敗分開，回傳(False, True)代表
+    「不是壞掉，只是艙門目前都在用」，讓呼叫端可以顯示比較不會誤導人的訊息。
+
+    ⚠️ 一戶多件包裹（package_count > 1）：body帶quantity告訴機器人這個任務
+    要開幾個艙門，機器人端的回應格式**需要機器人team配合**回傳
+    door_numbers（陣列，例如["H_01","H_02"]）而不是單一door_number字串。
+    這裡兩種回應格式都接住（優先讀door_numbers，沒有的話退回讀單一
+    door_number當作相容舊版），door_id最終存成逗號分隔字串（"H_01,H_02"）。
+    在機器人team真的支援回傳door_numbers之前，quantity>1的請求實際上
+    還是只會拿到一個門號，等於沒有真的多開——這件事必須跟機器人team
+    對好規格才會生效。
+    """
     package = db.query(Package).filter(Package.id == package_id).first()
-    package.door_id = door_number
+    quantity = package.package_count if package and package.package_count else 1
+
+    ok, resp, error = call_robot_api(
+        "POST", f"/api/packages/{package_id}/assign", json={"quantity": quantity}
+    )
+    if not ok:
+        no_door_available = resp is not None and resp.status_code in (400, 409)
+        log_event(
+            db, "door_assign_failed",
+            detail=("目前艙門皆已佔用" if no_door_available else error),
+            package_id=package_id,
+            level="warning" if no_door_available else "error",
+        )
+        return False, no_door_available
+
+    data = resp.json()
+    door_numbers = data.get("door_numbers")
+    if door_numbers:
+        door_id_value = ",".join(door_numbers)
+    else:
+        # 相容機器人端還沒支援多門號回應的情況，只拿得到單一door_number
+        door_id_value = data.get("door_number")
+
+    package.door_id = door_id_value
     package.door_assigned_at = now_taipei()
     db.commit()
-    log_event(db, "door_assigned", detail=f"door_number={door_number}", package_id=package_id)
+
+    if quantity > 1:
+        log_event(
+            db, "multi_package_assigned",
+            detail=f"quantity={quantity} door_id={door_id_value}"
+            + ("" if door_numbers else "（機器人回應只有單一門號，實際可能沒有真的開到quantity份的艙門，需跟機器人team確認）"),
+            package_id=package_id,
+            level="info" if door_numbers else "warning",
+        )
+    else:
+        log_event(db, "door_assigned", detail=f"door_number={door_id_value}", package_id=package_id)
 
    # for line_user_id in get_recipients(db, package_id):
-   #     push_status_update(line_user_id, f"已為您準備包裹，管理員正在安排放置艙門 {door_number}")
+   #     push_status_update(line_user_id, f"已為您準備包裹，管理員正在安排放置艙門 {door_id_value}")
 
-    return True
+    return True, False
 
-def handle_postback(data: str, reply_token: str, triggered_by: str):
-    """解析postback的data參數，格式類似 action=PICKUP_NOW&package_id=xxx"""
+def parse_and_round_schedule_datetime(postback_params):
+    """
+    從datetimepicker的postback_params挖出使用者選的時間，無條件進位到下一個整點
+    （選2:15會變成3:00，因為捨去會讓生效時間早於使用者選的時間，邏輯矛盾；
+    剛好選到整點就不用進位）。
+
+    回傳 (selected_dt, selected_dt_raw, was_rounded, error_message)：
+    - 成功：error_message是None，selected_dt是進位後的整點，selected_dt_raw是使用者原本選的時間
+    - 失敗：selected_dt/selected_dt_raw是None，error_message是要回覆給使用者的文字
+    """
+    selected = None
+    if postback_params is not None:
+        selected = getattr(postback_params, "datetime", None)
+        if selected is None and isinstance(postback_params, dict):
+            selected = postback_params.get("datetime")
+
+    if not selected:
+        return None, None, False, "沒有收到您選擇的時間，請重新點選「預約取貨」"
+
+    try:
+        selected_dt_raw = datetime.strptime(selected, "%Y-%m-%dT%H:%M")
+    except ValueError:
+        return None, None, False, "時間格式有誤，請重新點選「預約取貨」"
+
+    if selected_dt_raw.minute == 0 and selected_dt_raw.second == 0:
+        selected_dt = selected_dt_raw.replace(second=0, microsecond=0)
+        was_rounded = False
+    else:
+        selected_dt = selected_dt_raw.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+        was_rounded = True
+
+    if selected_dt <= now_taipei():
+        return None, None, False, "預約時間必須是未來的時段，請重新點選「預約取貨」"
+
+    return selected_dt, selected_dt_raw, was_rounded, None
+
+
+def handle_postback(data: str, reply_token: str, triggered_by: str, postback_params=None):
+    """
+    解析postback的data參數，格式類似 action=PICKUP_NOW&package_id=xxx。
+    postback_params是LINE的datetimepicker這類「附加輸入」action回傳的額外資料
+    （例如使用者選的時間），只有SCHEDULE_PICKUP會用到，其餘action都是None。
+    """
     params = dict(item.split("=") for item in data.split("&"))
     action = params.get("action")
     package_id = params.get("package_id")
@@ -393,9 +563,56 @@ def handle_postback(data: str, reply_token: str, triggered_by: str):
         if parsed is None:
             reply_text(reply_token, "找不到這筆包裹資料，請聯繫管理員")
             return
-        package = db.query(Package).filter(Package.id == parsed).first()
+        # 用 with_for_update(nowait=True) 鎖住這一列：LINE webhook偶爾會重送同一個事件
+        # （例如我們這邊處理稍慢、觸發LINE的重試機制），如果兩個一模一樣的postback
+        # 幾乎同時進來，沒有鎖的話兩邊都可能在對方寫入前讀到「還是舊狀態」，導致同一個動作
+        # （拒收/派送）被重複觸發兩次。
+        # 用nowait=True而不是傻等：這支函式是一般的def、在async的webhook handler裡
+        # 直接被呼叫，沒有丟進背景執行緒池，如果傻等鎖會卡住整個uvicorn事件迴圈，
+        # 讓同一時間點進來的其他所有請求（包括完全無關的包裹）都被拖累逾時，
+        # 反而造成更大範圍的服務中斷。鎖不到就直接當成「這是重複的postback」跳過。
+        try:
+            package = db.query(Package).filter(Package.id == parsed).with_for_update(nowait=True).first()
+        except OperationalError:
+            db.rollback()
+            reply_text(reply_token, "這筆包裹正在處理中，請稍候")
+            return
         if not package:
             reply_text(reply_token, "找不到這筆包裹資料，請聯繫管理員")
+            return
+
+        if action == "SCHEDULE_PICKUP":
+            if package.status != "pending":
+                reply_text(reply_token, "這筆包裹已經在處理中了，請耐心等候")
+                return
+
+            selected_dt, selected_dt_raw, was_rounded, error = parse_and_round_schedule_datetime(postback_params)
+            if error:
+                reply_text(reply_token, error)
+                return
+
+            package.status = "pickup_now"
+            package.scheduled_pickup_at = selected_dt
+            db.commit()
+            slot_end = selected_dt + timedelta(hours=1)
+            log_event(
+                db, "pickup_scheduled",
+                detail=f"預約時段={selected_dt.strftime('%Y-%m-%d %H:%M')}",
+                package_id=package.id,
+            )
+            if was_rounded:
+                reply_text(
+                    reply_token,
+                    f"預約取貨僅開放整點時段，您選擇的時間為 {selected_dt_raw.strftime('%m/%d %H:%M')}， "
+                    f"系統已為您預約 {selected_dt.strftime('%m/%d %H:%M')}-{slot_end.strftime('%H:%M')} 進行送貨。"
+                    "\n屆時請留意LINE通知",
+                )
+            else:
+                reply_text(
+                    reply_token,
+                    f"已為您預約 {selected_dt.strftime('%m/%d %H:%M')}-{slot_end.strftime('%H:%M')} 取貨，"
+                    "屆時機器人才會開始派送，請留意LINE通知",
+                )
             return
 
         if action == "PICKUP_NOW":
@@ -416,6 +633,7 @@ def handle_postback(data: str, reply_token: str, triggered_by: str):
                 db.commit()
                 log_event(db, "rejected", detail="住戶到貨通知直接按不收，包裹作廢", package_id=package.id)
                 reply_text(reply_token, "已為您取消這次收件，包裹不會派送，將維持在管理室")
+                send_pending_pickup_notification(db, package)
 
                 # triggered_binding = db.query(LineBinding).filter(
                 #     LineBinding.line_user_id == triggered_by
@@ -449,6 +667,7 @@ def handle_postback(data: str, reply_token: str, triggered_by: str):
                 db.commit()
                 log_event(db, "rejected_at_door", detail="住戶在機器人抵達後按拒收", package_id=package.id)
                 reply_text(reply_token, "已為您取消取貨，包裹將由機器人送回管理室，請聯繫管理員協助處理")
+                send_pending_pickup_notification(db, package)
 
                 # triggered_binding = db.query(LineBinding).filter(
                 #     LineBinding.line_user_id == triggered_by
@@ -483,6 +702,7 @@ def handle_postback(data: str, reply_token: str, triggered_by: str):
 class CreatePackageRequest(BaseModel):
     unit: str
     recipient_name: Optional[str] = None
+    quantity: int = Field(default=1, ge=1, le=4)
 
 class PickupVerifyRequest(BaseModel):
     scanned_content: Optional[str] = None
@@ -508,7 +728,7 @@ async def create_package(payload: CreatePackageRequest, db: Session = Depends(ge
         if matched and matched[0].solo_notify:
             targets = matched
 
-    package = Package(unit=payload.unit, line_user_id=targets[0].line_user_id, status="pending")
+    package = Package(unit=payload.unit, line_user_id=targets[0].line_user_id, status="pending", package_count=payload.quantity)
     db.add(package)
     db.commit()
     db.refresh(package)
@@ -520,7 +740,7 @@ async def create_package(payload: CreatePackageRequest, db: Session = Depends(ge
     notify_failed = []
     for binding in targets:
         try:
-            push_arrival_notification(binding.line_user_id, str(package.id), payload.unit)
+            push_arrival_notification(binding.line_user_id, str(package.id), payload.unit, payload.quantity)
         except Exception as e:
             # 包裹已經成功建立了，通知失敗不該讓整個request看起來像失敗，
             # 記下來讓管理員知道這個人可能沒收到通知就好
@@ -533,7 +753,7 @@ async def create_package(payload: CreatePackageRequest, db: Session = Depends(ge
 
     log_event(
         db, "created",
-        detail=f"unit={payload.unit} notified_count={len(targets)}"
+        detail=f"unit={payload.unit} quantity={payload.quantity} notified_count={len(targets)}"
         + (f" 通知失敗: {', '.join(notify_failed)}" if notify_failed else ""),
         package_id=package.id,
     )
@@ -597,7 +817,9 @@ async def admin_list_packages(
                 "unit": p.unit,
                 "status": p.status,
                 "door_id": p.door_id,
+                "package_count": p.package_count,
                 "created_at": p.created_at.isoformat() if p.created_at else None,
+                "scheduled_pickup_at": p.scheduled_pickup_at.isoformat() if p.scheduled_pickup_at else None,
                 "returned_at": p.returned_at.isoformat() if p.returned_at else None,
                 "return_door_opened_at": p.return_door_opened_at.isoformat() if p.return_door_opened_at else None,
                 "door_closed_at": p.door_closed_at.isoformat() if p.door_closed_at else None,
@@ -638,7 +860,9 @@ async def admin_live_packages(db: Session = Depends(get_db)):
             "unit": p.unit,
             "status": p.status,
             "door_id": p.door_id,
+            "package_count": p.package_count,
             "created_at": p.created_at.isoformat() if p.created_at else None,
+            "scheduled_pickup_at": p.scheduled_pickup_at.isoformat() if p.scheduled_pickup_at else None,
             "returned_at": p.returned_at.isoformat() if p.returned_at else None,
             "return_door_opened_at": p.return_door_opened_at.isoformat() if p.return_door_opened_at else None,
             "door_closed_at": p.door_closed_at.isoformat() if p.door_closed_at else None,
@@ -653,11 +877,11 @@ STATUS_BUCKET = {
     "completed": "已完成",
     "delivering": "派送中",
     "arrived": "已抵達",
-    "rejected_at_door": "已退回",
-    "returned_timeout": "已退回",
+    "rejected_at_door": "拒收已退回",
+    "returned_timeout": "逾時已退回",
     "pending": "尚未派工",
     "pickup_now": "尚未派工",
-    "voided": "尚未派工",
+    "voided": "不派工",
 }
 
 EXCEPTION_STATUSES = ("rejected_at_door", "returned_timeout", "voided")
@@ -804,6 +1028,19 @@ async def admin_daily_report(date: str, db: Session = Depends(get_db)):
         .all()
     )
 
+    # 任務時間軸的包裹查詢用清單：不能只看updated_at，因為很多背景排程失敗時只寫log、
+    # 不會動到包裹欄位（例如check_assign_timeout/poll_robot_returned失敗時），
+    # 這種情況下包裹的updated_at不會是今天，但今天確實有它的log紀錄，
+    # 任務時間軸查門牌/狀態時應該要查得到，不然會誤判成「非當天建立/更新的包裹」。
+    # 這裡用「今天有更新的包裹」∪「今天有log紀錄的包裹」的聯集，
+    # 跟上面status_summary/package_count（真正的「今天有幾筆狀態異動」統計）分開，語意不同。
+    log_package_ids = {log.package_id for log in logs_today if log.package_id}
+    today_package_ids = {p.id for p in packages_today}
+    extra_ids = log_package_ids - today_package_ids
+    packages_for_lookup = list(packages_today)
+    if extra_ids:
+        packages_for_lookup += db.query(Package).filter(Package.id.in_(extra_ids)).all()
+
     return {
         "date": date,
         "package_status_summary": status_summary,
@@ -817,7 +1054,7 @@ async def admin_daily_report(date: str, db: Session = Depends(get_db)):
                 "created_at": p.created_at.isoformat() if p.created_at else None,
                 "updated_at": p.updated_at.isoformat() if p.updated_at else None,
             }
-            for p in packages_today
+            for p in packages_for_lookup
         ],
         "task_logs": [
             {
@@ -853,8 +1090,19 @@ async def place_package(package_id: str, db: Session = Depends(get_db)):
     if package.door_id is not None:
         raise HTTPException(status_code=400, detail="這筆包裹已經分配過艙門了")
 
-    assigned = try_assign_door(package_id, db)
+    if package.scheduled_pickup_at is not None and now_taipei() < package.scheduled_pickup_at:
+        raise HTTPException(
+            status_code=409,
+            detail=f"這筆包裹預約於 {package.scheduled_pickup_at.strftime('%m/%d %H:%M')} 才能放置派送，請屆時再試",
+        )
+
+    assigned, no_door_available = try_assign_door(package_id, db)
     if not assigned:
+        if no_door_available:
+            raise HTTPException(
+                status_code=409,
+                detail="目前四個艙門都已被使用中，請等前面的包裹派送完成、艙門釋放後再試",
+            )
         raise HTTPException(status_code=502, detail="呼叫機器人開門失敗，請確認機器人與艙門連線狀態後再試")
 
     return {"status": "ok", "package_id": str(package.id), "door_id": package.door_id}
@@ -899,6 +1147,8 @@ async def admin_dispatch_batch(db: Session = Depends(get_db)):
     for package in packages:
         if ok:
             package.status = "delivering"
+            if package.id == first_package.id:
+                package.stop_dispatched_at = now_taipei()
         db.commit()
 
         if ok:
@@ -949,7 +1199,7 @@ async def robot_arrived(package_id: str, db: Session = Depends(get_db)):
 
     for line_user_id in get_recipients(db, package_id):
         try:
-            push_arrived_notification(line_user_id, str(package.id))
+            push_arrived_notification(line_user_id, str(package.id), package.package_count)
         except Exception as e:
             log_event(db, "notify_failed", detail=f"推播抵達通知失敗: {e}", package_id=package.id, level="error")
 
@@ -990,13 +1240,19 @@ async def pickup_verify(package_id: str, payload: PickupVerifyRequest = None, db
         log_event(db, "pickup_open_failed", detail=error, package_id=package.id, level="error")
         raise HTTPException(status_code=502, detail="機器人開門失敗，請聯繫管理員協助取件")
 
-    log_event(db, "pickup_opened", detail=f"scanned_by={scanning_user_id}", package_id=package.id)
+    # 機器人開門這個關鍵動作已經成功了，接下來記log、推播「取貨完成」按鈕都只是附加動作，
+    # 就算這段出錯，也不該讓整個request變成500回給LIFF——住戶端看到的應該還是
+    # 「門已經開了」的成功畫面，附加動作失敗頂多在後台log裡看得到，不影響住戶體驗。
+    try:
+        log_event(db, "pickup_opened", detail=f"scanned_by={scanning_user_id}", package_id=package.id)
 
-    for line_user_id in get_recipients(db, package_id):
-        try:
-            push_pickup_complete_button(line_user_id, str(package.id))
-        except Exception as e:
-            log_event(db, "notify_failed", detail=f"推播取貨完成按鈕失敗: {e}", package_id=package.id, level="error")
+        for line_user_id in get_recipients(db, package_id):
+            try:
+                push_pickup_complete_button(line_user_id, str(package.id), package.package_count)
+            except Exception as e:
+                log_event(db, "notify_failed", detail=f"推播取貨完成按鈕失敗: {e}", package_id=package.id, level="error")
+    except Exception as e:
+        print(f"[pickup_verify] 開門成功後的log/推播流程發生未預期例外: {e}")
 
     return {"status": "ok", "message": "驗證通過，艙門已開啟"}
 
@@ -1012,7 +1268,13 @@ def complete_pickup(package_id: str) -> dict:
         if parsed is None:
             return {"ok": False, "detail": "找不到這筆包裹"}
 
-        package = db.query(Package).filter(Package.id == parsed).first()
+        # 同樣用nowait=True，理由跟handle_postback一樣：這支函式常常被async的
+        # webhook handler直接呼叫，傻等鎖會卡住整個事件迴圈，影響到完全無關的請求。
+        try:
+            package = db.query(Package).filter(Package.id == parsed).with_for_update(nowait=True).first()
+        except OperationalError:
+            db.rollback()
+            return {"ok": False, "detail": "這筆包裹正在處理中，請稍候再試"}
         if not package:
             return {"ok": False, "detail": "找不到這筆包裹"}
 
@@ -1077,6 +1339,7 @@ def check_pickup_timeout():
            #     push_status_update(line_user_id, "逾時未取，包裹將退回管理室")
             log_event(db, "returned_timeout", detail="超過8分鐘未取貨，自動觸發退回", package_id=package.id)
             db.commit()
+            send_pending_pickup_notification(db, package)
 
             # 機器人動作：關門 + 關閉任務畫面（清掉QR，包裹此時還在艙門內）
             ok, resp, error = call_robot_api(
@@ -1146,7 +1409,7 @@ def check_return_timeout():
     我們這邊把return_door_opened_at重設回空，讓Dashboard的紅色提示框重新顯示「開門」按鈕，
     管理員可以再按一次重新開門取件。
 
-    ⚠️ 8分鐘：機器人超過10分鐘沒有動作會死機，所以門檻抓在10分鐘之內，
+    8分鐘：機器人超過10分鐘沒有動作會死機，所以門檻抓在10分鐘之內，
     跟 check_pickup_timeout / check_assign_timeout 三支統一用同樣的8分鐘。
     """
     from datetime import timedelta
@@ -1599,10 +1862,9 @@ async def redispatch_package(package_id: str, db: Session = Depends(get_db)):
 @app.post("/packages/{package_id}/notify-pending-pickup")
 async def notify_pending_pickup(package_id: str, db: Session = Depends(get_db)):
     """
-    例外處理頁：管理員可手動推播提醒住戶，告知有一筆包裹因故未能送達、
-    目前暫存在管理室，並說明超過72小時未取，管理員將會把包裹作廢處理。
-    只能觸發一次——反正超過72小時本來就會被作廢，不需要重複提醒，
-    送過之後用 pending_pickup_notified_at 記錄下來，擋掉之後的重複觸發。
+    例外處理頁「通知住戶」按鈕：正常情況下，包裹一轉成拒收/逾時/不收就已經自動發送過這則
+    提醒了（見 send_pending_pickup_notification），這支API保留下來當補發用——例如自動發送
+    當下推播失敗，管理員可以在這裡手動再觸發一次。
     """
     package = get_package_or_404(db, package_id)
 
@@ -1615,37 +1877,15 @@ async def notify_pending_pickup(package_id: str, db: Session = Depends(get_db)):
     if package.pending_pickup_notified_at is not None:
         raise HTTPException(status_code=400, detail="這筆包裹已經通知過住戶了，不需要重複通知")
 
-    recipients = get_recipients(db, package_id)
-    if not recipients:
+    result = send_pending_pickup_notification(db, package)
+    if not result["sent"]:
         raise HTTPException(status_code=400, detail="找不到這筆包裹的收件人，無法通知")
-
-    message = (
-        f"您有一筆包裹（門牌：{package.unit}）因故未能送達，目前暫存於管理室，"
-        "請盡快聯繫管理員領取。若超過72小時仍未領取，管理員將會把包裹作廢處理。"
-    )
-
-    notify_failed_count = 0
-    for line_user_id in recipients:
-        try:
-            push_status_update(line_user_id, message)
-        except Exception as e:
-            notify_failed_count += 1
-            log_event(db, "notify_failed", detail=f"未取包裹提醒通知失敗: {e}", package_id=package.id, level="error")
-
-    package.pending_pickup_notified_at = now_taipei()
-    db.commit()
-
-    log_event(
-        db, "pending_pickup_notified",
-        detail=f"通知 {len(recipients) - notify_failed_count}/{len(recipients)} 位收件人",
-        package_id=package.id,
-    )
 
     return {
         "status": "ok",
         "package_id": str(package.id),
-        "notified_count": len(recipients) - notify_failed_count,
-        "notify_failed_count": notify_failed_count,
+        "notified_count": result["notified_count"],
+        "notify_failed_count": result["notify_failed_count"],
     }
 
 
@@ -1818,6 +2058,12 @@ ADMIN_DASHBOARD_HTML = """
       <select id="unitSelect"><option value="">請選擇門牌</option></select>
       <select id="nameSelect"><option value="">請先選擇門牌</option></select>
     </div>
+    <select id="quantitySelect" style="flex-shrink:0;width:90px;">
+      <option value="1">1件</option>
+      <option value="2">2件</option>
+      <option value="3">3件</option>
+      <option value="4">4件</option>
+    </select>
     <button id="createBtn" onclick="createPackage()">建立包裹並通知</button>
   </div>
   <div id="createMsg"></div>
@@ -1861,8 +2107,8 @@ ADMIN_DASHBOARD_HTML = """
   </div>
   <div id="unitQueryResult" style="margin-bottom:12px;"></div>
   <table>
-    <thead><tr><th>門牌</th><th>狀態</th><th>艙門</th><th>建立時間</th><th>操作</th></tr></thead>
-    <tbody id="packageTableBody"><tr><td colspan="5">載入中...</td></tr></tbody>
+    <thead><tr><th>門牌</th><th>狀態</th><th>艙門</th><th>建立時間</th><th>預約時間</th><th>操作</th></tr></thead>
+    <tbody id="packageTableBody"><tr><td colspan="6">載入中...</td></tr></tbody>
   </table>
   <div style="display:flex;align-items:center;justify-content:flex-end;gap:16px;margin-top:10px;font-size:13px;color:#888;">
     <span id="packagePagerInfo"></span>
@@ -1909,6 +2155,7 @@ document.getElementById('unitSelect').addEventListener('change', updateNameOptio
 async function createPackage() {
   const unit = document.getElementById('unitSelect').value;
   const recipient_name = document.getElementById('nameSelect').value;
+  const quantity = parseInt(document.getElementById('quantitySelect').value, 10) || 1;
   const msgEl = document.getElementById('createMsg');
   const btn = document.getElementById('createBtn');
   if (!unit) { msgEl.style.color = 'red'; msgEl.textContent = '請先選擇門牌'; return; }
@@ -1920,7 +2167,7 @@ async function createPackage() {
     const resp = await fetch('/packages', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ unit, recipient_name: recipient_name || null }),
+      body: JSON.stringify({ unit, recipient_name: recipient_name || null, quantity }),
     });
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.detail || '建立失敗');
@@ -1989,12 +2236,12 @@ async function loadPackageTablePage() {
   } catch (e) {
     // fetch本身失敗，或後端回傳的不是合法JSON（例如500的原始錯誤文字）
     document.getElementById('packageTableBody').innerHTML =
-      `<tr><td colspan="5" style="color:red">載入失敗：${e.message}</td></tr>`;
+      `<tr><td colspan="6" style="color:red">載入失敗：${e.message}</td></tr>`;
     return;
   }
   if (!resp.ok) {
     document.getElementById('packageTableBody').innerHTML =
-      `<tr><td colspan="5" style="color:red">載入失敗：${data.detail || '未知錯誤'}</td></tr>`;
+      `<tr><td colspan="6" style="color:red">載入失敗：${data.detail || '未知錯誤'}</td></tr>`;
     return;
   }
   packagePageTotal = data.total;
@@ -2052,29 +2299,60 @@ function renderPackageTable(pageItems, totalPages) {
   const nextBtn = document.getElementById('packageNextBtn');
 
   if (packagePageTotal === 0) {
-    tbody.innerHTML = '<tr><td colspan="5">目前沒有包裹</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="6">目前沒有包裹</td></tr>';
     infoEl.textContent = '';
     setPackagePagerLinkState(prevBtn, true);
     setPackagePagerLinkState(nextBtn, true);
     return;
   }
 
+  const now = new Date();
+
   tbody.innerHTML = pageItems.map(p => {
     const label = STATUS_LABEL[p.status] || p.status;
     const createdAt = p.created_at ? p.created_at.replace('T', ' ').slice(0, 16) : '-';
     const door = p.door_id || '尚未分配';
+
+    // 預約時間到了、但還沒放置（沒有door_id）：這是需要管理員動作的時刻，
+    // 用醒目的橘色底色+文字提醒，跟一般預約中（時間還沒到，純文字顯示）做區隔
+    let scheduledCell = '-';
+    let rowStyle = '';
+    if (p.scheduled_pickup_at) {
+      const scheduledDate = new Date(p.scheduled_pickup_at);
+      const scheduledText = p.scheduled_pickup_at.replace('T', ' ').slice(0, 16);
+      const timeArrived = scheduledDate <= now;
+      if (timeArrived && !p.door_id && p.status === 'pickup_now') {
+        scheduledCell = `<span style="background:#ff9800;color:white;padding:2px 8px;border-radius:10px;font-size:12px;font-weight:bold;">預約時間已到 ${scheduledText}</span>`;
+        rowStyle = 'background:#fff3e0;';
+      } else {
+        scheduledCell = scheduledText;
+      }
+    }
+
     // 拒收/逾時/不收這幾個狀態的操作按鈕，已經統一在上面的紅色提示框處理了，
     // 這裡不再重複放按鈕，避免同一筆包裹在畫面上出現兩個功能一樣的按鈕。
     // pickup_now分兩種：還沒放置（要按「放置包裹」呼叫機器人開門）、已放置（等批次派送，不用按鈕）
-    const action = p.status === 'pickup_now'
-      ? (p.door_id
-          ? '已放置，等待派送'
-          : `<button onclick="placePackage(this, '${p.id}')">放置包裹</button>`)
-      : '-';
-    return `<tr>
-      <td>${p.unit}</td>
+    let action;
+    if (p.status === 'pickup_now') {
+      if (p.door_id) {
+        action = '已放置，等待派送';
+      } else if (p.scheduled_pickup_at && new Date(p.scheduled_pickup_at) > now) {
+        action = `<span style="opacity:0.6;">預約中，未到時間</span>`;
+      } else {
+        action = `<button onclick="placePackage(this, '${p.id}')">放置包裹</button>`;
+      }
+    } else {
+      action = '-';
+    }
+
+    const unitCell = p.package_count > 1
+      ? `${p.unit} <span style="background:#e3f2fd;color:#0d47a1;padding:1px 6px;border-radius:8px;font-size:11px;">${p.package_count}件</span>`
+      : p.unit;
+
+    return `<tr style="${rowStyle}">
+      <td>${unitCell}</td>
       <td><span class="status-badge status-${p.status}">${label}</span></td>
-      <td>${door}</td><td>${createdAt}</td><td>${action}</td>
+      <td>${door}</td><td>${createdAt}</td><td>${scheduledCell}</td><td>${action}</td>
     </tr>`;
   }).join('');
 
@@ -2134,31 +2412,53 @@ function renderRejectAlert(packages) {
   const reasonLabel = { rejected_at_door: '拒收', returned_timeout: '逾時未取', voided: '不收（作廢）' };
   const btnStyle = 'background:white;color:#dc3545;border:none;padding:6px 14px;border-radius:6px;font-size:13px;cursor:pointer;';
 
+  // 拒收/逾時退回的艙門是機器人一次批次開/關所有還在等的門，不是各自獨立，
+  // 所以開門/關門不用每一列各自一顆按鈕，統一放在整個提示框右上角一組。
+  // voided沒有機器人動作、本來就是各自獨立處理，維持每列各自的「確定」按鈕。
+  const returnPending = pending.filter(p => p.status !== 'voided');
+  let batchActionHtml = '';
+  if (returnPending.length > 0) {
+    const anyWaitingReturn = returnPending.some(p => !p.returned_at);
+    const anyWaitingOpen = returnPending.some(p => p.returned_at && !p.return_door_opened_at);
+    const repPackageId = returnPending[0].id;
+    if (anyWaitingReturn) {
+      batchActionHtml = `<span style="opacity:0.9;font-size:14px;">等待機器人返回</span>`;
+    } else if (anyWaitingOpen) {
+      batchActionHtml = `<button style="${btnStyle}" onclick="openReturnDoor(this, '${repPackageId}')">開門（全部退回艙門）</button>`;
+    } else {
+      batchActionHtml = `<button style="${btnStyle}" onclick="closeDoor(this, '${repPackageId}')">關門（全部退回艙門）</button>`;
+    }
+  }
+
   alertEl.style.display = 'block';
   alertEl.innerHTML = `
-    <b>有 ${pending.length} 筆包裹需要處理，請確認</b>
+    <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-bottom:10px;">
+      <b>有 ${pending.length} 筆包裹需要處理，請確認</b>
+      ${batchActionHtml}
+    </div>
     <table>
-      <thead><tr><th>門牌</th><th>艙門</th><th>原因</th><th>操作</th></tr></thead>
+      <thead><tr><th>門牌</th><th>艙門</th><th>原因</th><th>狀態</th><th></th></tr></thead>
       <tbody>
         ${pending.map(p => {
-          let action;
+          let statusText, forceResolveHtml = '';
           if (p.status === 'voided') {
-            action = `<button style="${btnStyle}" onclick="acknowledgeVoid(this, '${p.id}')">確定</button>`;
+            statusText = `<button style="${btnStyle}" onclick="acknowledgeVoid(this, '${p.id}')">確定</button>`;
           } else if (!p.returned_at) {
-            action = `<span style="opacity:0.8;">等待機器人返回...</span>
-              <a href="javascript:void(0)" onclick="forceResolve(this, '${p.id}')" style="margin-left:10px;font-size:12px;color:white;text-decoration:underline;cursor:pointer;">手動結案</a>`;
+            statusText = `<span style="opacity:0.8;">等待機器人返回</span>`;
+            forceResolveHtml = `<a href="javascript:void(0)" onclick="forceResolve(this, '${p.id}')" style="font-size:12px;color:white;text-decoration:underline;cursor:pointer;">手動結案</a>`;
           } else if (!p.return_door_opened_at) {
-            action = `<button style="${btnStyle}" onclick="openReturnDoor(this, '${p.id}')">開門</button>
-              <a href="javascript:void(0)" onclick="forceResolve(this, '${p.id}')" style="margin-left:10px;font-size:12px;color:white;text-decoration:underline;cursor:pointer;">手動結案</a>`;
+            statusText = `<span style="opacity:0.8;">待開門</span>`;
+            forceResolveHtml = `<a href="javascript:void(0)" onclick="forceResolve(this, '${p.id}')" style="font-size:12px;color:white;text-decoration:underline;cursor:pointer;">手動結案</a>`;
           } else {
-            action = `<button style="${btnStyle}" onclick="closeDoor(this, '${p.id}')">關門</button>
-              <a href="javascript:void(0)" onclick="forceResolve(this, '${p.id}')" style="margin-left:10px;font-size:12px;color:white;text-decoration:underline;cursor:pointer;">手動結案</a>`;
+            statusText = `<span style="opacity:0.8;">待關門</span>`;
+            forceResolveHtml = `<a href="javascript:void(0)" onclick="forceResolve(this, '${p.id}')" style="font-size:12px;color:white;text-decoration:underline;cursor:pointer;">手動結案</a>`;
           }
           return `<tr>
           <td>${p.unit}</td>
           <td>${p.door_id || '-'}</td>
           <td>${reasonLabel[p.status] || p.status}</td>
-          <td>${action}</td>
+          <td>${statusText}</td>
+          <td style="text-align:right;">${forceResolveHtml}</td>
         </tr>`;
         }).join('')}
       </tbody>
@@ -2802,7 +3102,7 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 async function notifyPendingPickup(btn, packageId) {
-  if (!confirm('確定要通知住戶：這筆包裹目前暫存於管理室，超過72小時未取管理員將作廢處理嗎？（只能通知一次，請確認後再送出）')) return;
+  if (!confirm('確定要補發包裹通知給住戶嗎？（只能通知一次，請確認後再送出）')) return;
   btn.disabled = true;
   const originalText = btn.textContent;
   btn.textContent = '通知中...';

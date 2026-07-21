@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import Column, String, DateTime, Boolean
+from sqlalchemy import Column, String, DateTime, Boolean, Integer
 from sqlalchemy.dialects.postgresql import UUID
 
 from app.db import Base
@@ -31,10 +31,12 @@ class Package(Base):
     unit = Column(String(50), nullable=False)                  # 門牌
     line_user_id = Column(String(100), nullable=False)         # 收件人 LINE User ID
     status = Column(String(30), nullable=False, default="pending")
+    package_count = Column(Integer, nullable=False, default=1)  # 這個任務代表幾件實體包裹（1-4），決定要開幾個艙門
     # pending / pickup_now / delivering / arrived
     # / completed / returned_timeout / voided / rejected_at_door
     door_id = Column(String(10), nullable=True)                # 分配的艙門編號
     door_assigned_at = Column(DateTime, nullable=True)          # 艙門分配（放置包裹開門）的時間，逾時判斷用
+    stop_dispatched_at = Column(DateTime, nullable=True)        # 這一站真正呼叫/api/robot/dispatch派送出去的時間，防止並發重複派送同一站
     arrived_at = Column(DateTime, nullable=True)                # 機器人抵達時間，逾時判斷用
     returned_at = Column(DateTime, nullable=True)               # 機器人實際返回管理室的時間（拒收/逾時退回專用，門此時還沒開）
     return_door_opened_at = Column(DateTime, nullable=True)     # 管理員按「開門」，機器人真的開門讓管理員取出包裹的時間
@@ -43,6 +45,7 @@ class Package(Base):
     redispatched_at = Column(DateTime, nullable=True)            # 已重新派送的時間（例外處理頁按下「重新派貨」）
     redispatched_to = Column(UUID(as_uuid=True), nullable=True)  # 重新派送後，新建立的包裹ID
     pending_pickup_notified_at = Column(DateTime, nullable=True)  # 例外處理頁「通知住戶」的時間，只能通知一次
+    scheduled_pickup_at = Column(DateTime, nullable=True)  # 住戶預約取貨的時間（整點），到這個時間前不能放置/派送
     created_at = Column(DateTime, default=now_taipei)
     updated_at = Column(DateTime, default=now_taipei, onupdate=now_taipei)
     case_closed_at = Column(DateTime, nullable=True)
@@ -88,6 +91,8 @@ class TaskLog(Base):
     # / assign_timeout / assign_timeout_failed / return_timeout / return_timeout_failed
     # / poll_returned_failed
     # / force_resolved
+    # / pickup_scheduled
+    # / multi_package_assigned
     level = Column(String(10), nullable=False, default="info")  # info / warning / error
     detail = Column(String(500), nullable=True)
     created_at = Column(DateTime, default=now_taipei)
