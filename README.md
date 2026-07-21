@@ -2,7 +2,7 @@
 
 對應整體系統三大部分（管理員Dashboard／LINE／送貨機器人）中的LINE部分。
 
-## 目前完成進度（更新於 2026/7/17）
+## 目前完成進度（更新於 2026/7/20）
 
 ### 已完成
 
@@ -25,7 +25,7 @@
 
 **機器人整合**
 - 完整狀態機：`pending → pickup_now → delivering → arrived → completed`，另有 `rejected_at_door` / `returned_timeout` / `voided` 三種例外分支
-- 目前艙位為四艙位、五包裹容量，多包裹批次派送機制（`place_package`／`admin_dispatch_batch`／`advance_trip_or_return`）為啟用中的主要流程
+- 目前艙位為四艙位（`H_01`～`H_04`，機器人端硬性限制，同時最多4個艙門在用），支援單次最多5筆包裹需求：多包裹批次派送機制（`place_package`／`admin_dispatch_batch`／`advance_trip_or_return`）先派送前4筆（裝滿4個艙門），全部送達、機器人返航、艙門清空後，管理員再對第5筆重複「放置包裹」＋派送，等於分兩趟循環完成——這個流程完全依賴機器人回報的艙門空缺狀態動態判斷，程式碼裡沒有寫死門數上限，未來艙位數量調整不需要改code
 - 多包裹批次派送：一次關閉所有已裝載艙門，依序派往每一站（`advance_trip_or_return`），整趟結束後自動判斷要不要帶回未完成的包裹
 - 拒收/逾時退回統一走「機器人關門帶回管理室＋管理員取出後按關門」流程
 
@@ -39,7 +39,7 @@ pending → pickup_now → delivering → arrived → completed
 
 ### 待辦／已知風險
 
-**需要機器人配合**
+**需要機器人team配合**
 - 機器人回到管理室目前是自動開門，設計上應改成管理員在Dashboard按「開門」才真的開——LINE後端這邊的欄位與API已設計完成（`returned_at`／`return_door_opened_at`／`POST /packages/{id}/open-return-door`），需要機器人team：(1) 回管理室時門保持關閉，(2) 提供對應的 `/api/doors/return-open` API，兩邊確認規格後再一起上線
 
 **尚未處理的邊界情況**（依風險排序）
@@ -126,5 +126,5 @@ ngrok http 8000
 啟動伺服器後，開啟 `http://localhost:8000/docs` 可以互動測試所有API端點。
 
 ## 需要跟機器人模組確認的事項
-1. 機器人回到管理室後的開門時機（見上方「需要機器人配合」）
+1. 機器人回到管理室後的開門時機（見上方「需要機器人team配合」）
 2. Pudu API連線狀態與艙門即時狀態，目前是LINE後端主動呼叫 `/api/dashboard/status` 轉發給Dashboard顯示
