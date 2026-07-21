@@ -1,4 +1,6 @@
-/reference/
+# 專案運行時產生的本地資料夾（例如 log 檔或本機 DB）
+instance/
+reference/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

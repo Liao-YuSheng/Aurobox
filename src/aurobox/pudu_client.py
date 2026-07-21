@@ -25,9 +25,9 @@ def _create_robot_command_logger() -> logging.Logger:
         "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
     )
 
-    stream_handler = logging.StreamHandler()
-    stream_handler.setFormatter(formatter)
-    logger.addHandler(stream_handler)
+    # stream_handler = logging.StreamHandler()
+    # stream_handler.setFormatter(formatter)
+    # logger.addHandler(stream_handler)
 
     instance_dir = os.path.abspath(
         os.path.join(os.path.dirname(__file__), "..", "..", "instance")

@@ -129,6 +129,7 @@ def _poll_notify_display_qr(
         if not callback_base_url:
             print("[系統] CENTRAL_API_BASE_URL 未設定，略過抵達通知", flush=True)
             return
+
 '''
 def _push_dashboard_status_loop(app, poll_interval: int = 3):
     """背景執行緒：輪詢監控目標狀態，當發生變化時立刻推播給中央大腦。"""

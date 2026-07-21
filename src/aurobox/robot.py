@@ -238,5 +238,5 @@ class FlashbotController:
             else:
                 physical_states.append(state)
                 
-        print(f"模式: {self.door_mode} | 轉換: {control_states} -> {physical_states}", flush=True)
+        # print(f"模式: {self.door_mode} | 轉換: {control_states} -> {physical_states}", flush=True)
         return self.client.control_doors(sn or self.default_sn, physical_states)

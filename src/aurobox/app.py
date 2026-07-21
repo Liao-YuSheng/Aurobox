@@ -52,6 +52,21 @@ def ensure_default_doors(app: Flask) -> None:
 
     if db.session.new or db.session.dirty:
         db.session.commit()
+
+    # 新增：系統啟動時，自動對實體硬體下達「關閉所有艙門」指令
+    try:
+        controller = app.pudu_controller
+        control_states = [
+            {"operation": False, "door_number": door_number}
+            for door_number in active_door_numbers
+        ]
+        
+        print(f"[系統] 啟動初始化：準備關閉所有實體艙門 {active_door_numbers}...", flush=True)
+        controller.control_doors(sn=sn, control_states=control_states)
+        print("[系統] 初始化關門指令發送成功，軟硬體狀態已同步為 EMPTY！", flush=True)
+        
+    except Exception as e:
+        print(f"[系統] 初始化關門失敗 (機器人可能未連線): {e}", flush=True)
     
 def create_app(config=None, reset_db=True):
     """Create and configure Flask app."""
