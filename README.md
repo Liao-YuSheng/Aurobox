@@ -39,9 +39,6 @@ pending → pickup_now → delivering → arrived → completed
 
 ### 待辦／已知風險
 
-**需要機器人team配合**
-- 機器人回到管理室目前是自動開門，設計上應改成管理員在Dashboard按「開門」才真的開——LINE後端這邊的欄位與API已設計完成（`returned_at`／`return_door_opened_at`／`POST /packages/{id}/open-return-door`），需要機器人team：(1) 回管理室時門保持關閉，(2) 提供對應的 `/api/doors/return-open` API，兩邊確認規格後再一起上線
-
 **尚未處理的邊界情況**（依風險排序）
 - `delivering` 狀態沒有逾時偵測機制，機器人卡在半路不會被自動發現
 - 批次派送時「艙門已關但派送失敗」，包裹會卡在看不出異常的狀態，且不會出現在例外處理頁面
@@ -54,9 +51,8 @@ pending → pickup_now → delivering → arrived → completed
 
 **功能性待辦**
 - 住戶綁定沒有身份驗證，任何人輸入任意「門牌 姓名」都能綁定成功——規劃中的解法是白名單機制（管理員預先登記每個門牌對應的住戶姓名，綁定時比對，不符合就拒絕），需要先取得完整住戶名冊才能上線，目前尚未實作
-- 圖形化Rich Menu（四按鈕：我的包裹／開啟限本人通知／關閉限本人通知／使用說明），已設計、PNG已生成，尚未部署，目前用文字指令代替
+- 圖形化Rich Menu，已設計、PNG已生成，尚未部署，目前用文字指令代替
 - `/admin/*` 所有路由目前沒有任何身份驗證機制
-- `/admin/packages` 沒有後端分頁或日期篩選，包裹資料長期累積後查詢效能可能變差
 
 ## 專案結構
 ```
