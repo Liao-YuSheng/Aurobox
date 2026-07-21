@@ -130,15 +130,16 @@ def assign_door_for_package(package_id):
         else:
             
             live_status = controller.get_status_summary(sn)
-            
+            '''
             is_already_home = (
                 live_status.get('current_location') == home_point and 
                 live_status.get('move_state') in ['IDLE', 'ARRIVE']
             )
             
             if not is_already_home:
-                payload = build_custom_call_payload(sn=sn, point=home_point)
-                controller.custom_call2(payload=payload)
+            '''
+            payload = build_custom_call_payload(sn=sn, point=home_point)
+            controller.custom_call2(payload=payload)
 
         payload = build_custom_call_payload(sn=sn, point=home_point)
         result = controller.custom_call2(payload=payload)
@@ -296,7 +297,7 @@ def robot_dispatch():
             point=target_point,
             call_mode = 'QR_CODE',
         )
-
+        time.sleep(6)
         # 1. 抓取回傳的 response
         dispatch_res = controller.custom_call2(payload=payload)
         
