@@ -21,6 +21,8 @@ def load_config():
         "DEFAULT_MAP_NAME": os.getenv("DEFAULT_MAP_NAME", ""),
         "HOME_POINT_NAME": os.getenv("HOME_POINT_NAME", "office"),
         "CHARGE_POINT_NAME": os.getenv("CHARGE_POINT_NAME", "閃閃充電"),
+        "DOOR_MODE": os.getenv("DOOR_MODE", "4_DOORS"),
+        
         "CENTRAL_API_BASE_URL": os.getenv("CENTRAL_API_BASE_URL", ""),
         "DATABASE_URL": os.getenv("DATABASE_URL", ""),
     }

@@ -6,10 +6,8 @@ from .models import db, Door, DoorStatus
 from .services import FlashbotController
 from .config import load_config
 from .api import api_bp
-from .tasks import _push_dashboard_status_loop
+# from .tasks import _push_dashboard_status_loop
 import threading
-
-DEFAULT_DOOR_NUMBERS = ("H_01", "H_02", "H_03", "H_04")  # 預設艙門號碼，請依實際硬體調整
 
 def ensure_default_doors(app: Flask) -> None:
     """Ensure default doors exist and reset them to empty at startup."""
@@ -17,13 +15,20 @@ def ensure_default_doors(app: Flask) -> None:
     if not sn:
         return
 
+    # 讀取設定檔中的 DOOR_MODE
+    mode = app.config.get('DOOR_MODE', '4_DOORS')
+    if mode == '3_DOORS':
+        active_door_numbers = ("H_01", "H_03", "H_04")
+    else:
+        active_door_numbers = ("H_01", "H_02", "H_03", "H_04")
+
     existing_numbers = {
         row[0]
         for row in db.session.query(Door.door_number).filter_by(sn=sn).all()
     }
 
     missing_numbers = [
-        door_number for door_number in DEFAULT_DOOR_NUMBERS if door_number not in existing_numbers
+        door_number for door_number in active_door_numbers if door_number not in existing_numbers
     ]
 
     for door_number in missing_numbers:
@@ -33,16 +38,17 @@ def ensure_default_doors(app: Flask) -> None:
                 door_number=door_number,
                 status=DoorStatus.EMPTY.value,
                 package_id=None,
+                task_id=None
             )
         )
     
-    doors = Door.query.filter(
-        Door.sn == sn,
-        Door.door_number.in_(DEFAULT_DOOR_NUMBERS),
-    ).all()
+    # 重置目前的邏輯門狀態
+    doors = Door.query.filter_by(sn=sn).all()
+    
     for door in doors:
         door.status = DoorStatus.EMPTY.value
         door.package_id = None
+        door.task_id = None
 
     if db.session.new or db.session.dirty:
         db.session.commit()
@@ -92,14 +98,14 @@ def create_app(config=None, reset_db=True):
     
     # 註冊 API 藍圖 (不再註冊 webhooks)
     app.register_blueprint(api_bp, url_prefix='/api')
-
+    '''
     push_thread = threading.Thread(
         target=_push_dashboard_status_loop,
         args=(app,), 
         daemon=True # 設定 daemon=True，這樣 Flask 關閉時執行緒也會跟著乾淨關閉
     )
     push_thread.start()
-
+    '''
     @app.get('/')
     def index():
         return jsonify({

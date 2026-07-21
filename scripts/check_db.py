@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 import sys
 from pathlib import Path
+from datetime import timezone  # 新增：引入 timezone 模組
 
 # 將 src 加入系統路徑，這樣 Python 才能找到 aurobox 這個套件
 src_path = Path(__file__).parent.parent / 'src'
@@ -37,8 +38,13 @@ def main():
             print("目前沒有機器人狀態記錄 (可能是尚未發送過任何導航指令)。")
         else:
             for state in robot_states:
-                # 格式化時間輸出
-                time_str = state.updated_at.strftime('%Y-%m-%d %H:%M:%S') if state.updated_at else 'N/A'
+                # 修改：將資料庫取出的 UTC 時間轉換為本機當地時間
+                if state.updated_at:
+                    local_time = state.updated_at.replace(tzinfo=timezone.utc).astimezone()
+                    time_str = local_time.strftime('%Y-%m-%d %H:%M:%S')
+                else:
+                    time_str = 'N/A'
+                    
                 print(f" - 機器人 SN: {state.sn}")
                 print(f" - 最後紀錄點位: {state.last_point}")
                 print(f" - 資料更新時間: {time_str}")

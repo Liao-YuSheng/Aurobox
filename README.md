@@ -167,7 +167,7 @@ python3 -u run.py --debug 2>&1 | tee -a instance/aurobox.log
   - 行為：拿出被退回的包裹後關閉艙門。​
 - `POST /api/doors/return-timeout`​ #增
   - 行為：退貨開門後並沒有關門，視為還沒拿貨，自動關門(維持 `full`)。
-- `GET /api/dashboard/status`​ (已停用)
+- `GET /api/dashboard/status` #還原
   - 行為：回傳機器人即時狀態摘要與本地艙門狀態。
   
 ## CLI

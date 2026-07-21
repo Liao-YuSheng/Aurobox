@@ -9,6 +9,7 @@ class FlashbotController:
         self.shop_id = config.get("SHOP_ID")
         self.default_sn = config.get("DEFAULT_SN")
         self.default_map_name = config.get("DEFAULT_MAP_NAME", "")
+        self.door_mode = config.get("DOOR_MODE", "4_DOORS")
         self.client = PuduApiClient(
             app_key=config["APP_KEY"],
             app_secret=config["APP_SECRET"],
@@ -224,4 +225,18 @@ class FlashbotController:
         return False
     
     def control_doors(self, sn: str | None, control_states: list) -> dict:
-        return self.client.control_doors(sn or self.default_sn, control_states)
+        physical_states = []
+        
+        for state in control_states:
+            logic_door = state.get("door_number")
+            op = state.get("operation")
+            
+            # 攔截並轉換
+            if self.door_mode == "3_DOORS" and logic_door == "H_01":
+                physical_states.append({"door_number": "H_01", "operation": op})
+                physical_states.append({"door_number": "H_02", "operation": op})
+            else:
+                physical_states.append(state)
+                
+        print(f"模式: {self.door_mode} | 轉換: {control_states} -> {physical_states}", flush=True)
+        return self.client.control_doors(sn or self.default_sn, physical_states)
