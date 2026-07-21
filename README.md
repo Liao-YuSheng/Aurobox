@@ -121,6 +121,3 @@ ngrok http 8000
 ## API 測試
 啟動伺服器後，開啟 `http://localhost:8000/docs` 可以互動測試所有API端點。
 
-## 需要跟機器人模組確認的事項
-1. 機器人回到管理室後的開門時機（見上方「需要機器人team配合」）
-2. Pudu API連線狀態與艙門即時狀態，目前是LINE後端主動呼叫 `/api/dashboard/status` 轉發給Dashboard顯示
