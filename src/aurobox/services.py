@@ -10,14 +10,21 @@ def get_controller():
     """Get FlashbotController instance."""
     return FlashbotController(load_config())
 
-def set_robot_target_point(sn: str, point: str):
-    """輔助函式：將機器人被指派的最新點位寫入資料庫"""
+def update_robot_state(sn: str, point: str = None, task_id: str = None, clear_task: bool = False):
+    """輔助函式：將機器人最新點位與任務 ID 寫入資料庫"""
     state = RobotState.query.filter_by(sn=sn).first()
     if not state:
-        state = RobotState(sn=sn, last_point=point)
+        state = RobotState(sn=sn)
         db.session.add(state)
-    else:
+        
+    if point is not None:
         state.last_point = point
+        
+    if clear_task:
+        state.current_task_id = None
+    elif task_id is not None:
+        state.current_task_id = task_id
+        
     db.session.commit()
 
 def check_and_return_home_if_empty():
@@ -41,10 +48,14 @@ def check_and_return_home_if_empty():
             live_status.get('move_state') in ['IDLE', 'ARRIVE']
         )
 
+        task = None
+        
         if not is_already_home:
             payload = build_custom_call_payload(sn=sn, point=home_point)
-            controller.custom_call2(payload=payload)
+            res = controller.custom_call2(payload=payload)
+            if res and res.get('message') == 'SUCCESS':
+                task = res.get('data', {}).get('task_id')
             
-        set_robot_target_point(sn, home_point)
+        update_robot_state(sn, point=home_point, task_id=task)
         return True
     return False

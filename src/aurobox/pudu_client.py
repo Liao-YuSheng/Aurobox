@@ -310,7 +310,20 @@ class PuduApiClient:
         except Exception as e:
             self._log_robot_instruction_error("custom_complete", payload, e)
             raise
-
+    
+    def custom_call_cancel(self, payload: dict) -> dict:
+        """中斷行進中的機器人任務"""
+        try:
+            result = self._post(
+                "/pudu-entry/open-platform-service/v1/custom_call/cancel",
+                payload,
+            )
+            self._log_robot_instruction("custom_call_cancel", payload, result)
+            return result
+        except Exception as e:
+            self._log_robot_instruction_error("custom_call_cancel", payload, e)
+            raise
+        
     def control_doors(self, sn: str, control_states: list) -> dict:
         """
         批次控制多個艙門的開關。

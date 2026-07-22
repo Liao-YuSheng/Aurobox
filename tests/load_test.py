@@ -1,68 +1,127 @@
-import requests
+import argparse
 import concurrent.futures
 import time
+from collections import Counter
 
-# 請替換為您 Flask 伺服器實際的位址與 Port
-API_URL = "http://127.0.0.1:5000/api/doors/assign"
-NUM_REQUESTS = 20  # 瞬間發起的請求數量
+import requests
 
-def send_assign_request(request_id):
-    """發送單一包裹分派請求"""
-    package_id = f"TEST_PKG_{request_id:03d}"
-    payload = {"id": package_id}
-    
+
+DEFAULT_BASE_URL = "http://127.0.0.1:5000"
+
+
+def _safe_json(response: requests.Response):
+    if response.headers.get("content-type", "").startswith("application/json"):
+        return response.json()
+    return response.text
+
+
+def _print_header(title: str):
+    print("\n" + "=" * 70)
+    print(title)
+    print("=" * 70)
+
+
+def case_assign_quantity(base_url: str, package_id: str, quantity: int, timeout: int):
+    _print_header("[Case 1] 多包裹分配：quantity > 1")
+    url = f"{base_url}/api/packages/{package_id}/assign"
+    payload = {"quantity": quantity}
+    print(f"POST {url}")
+    print(f"payload={payload}")
+
+    started = time.time()
+    resp = requests.post(url, json=payload, timeout=timeout)
+    elapsed = time.time() - started
+    body = _safe_json(resp)
+
+    print(f"HTTP {resp.status_code} | {elapsed:.3f}s")
+    print(body)
+
+
+def _send_assign(base_url: str, request_id: int, quantity: int, timeout: int):
+    package_id = f"LOAD_PKG_{request_id:03d}"
+    url = f"{base_url}/api/packages/{package_id}/assign"
     try:
-        # 發送 POST 請求
-        response = requests.post(API_URL, json=payload, timeout=5)
+        resp = requests.post(url, json={"quantity": quantity}, timeout=timeout)
         return {
             "req_id": request_id,
-            "status": response.status_code,
-            "response": response.json() if response.ok else response.text
+            "status": resp.status_code,
+            "body": _safe_json(resp),
         }
-    except requests.exceptions.RequestException as e:
+    except requests.exceptions.RequestException as exc:
         return {
             "req_id": request_id,
-            "status": "Network Error",
-            "response": str(e)
+            "status": "network_error",
+            "body": str(exc),
         }
 
-def run_test():
-    print(f"開始執行高併發壓力測試：瞬間發起 {NUM_REQUESTS} 個請求...")
-    start_time = time.time()
-    
+
+def case_assign_concurrent(base_url: str, requests_count: int, quantity: int, timeout: int):
+    _print_header("[Case 2] 併發分配：concurrent assign")
+    print(f"同時送出 {requests_count} 筆 assign，quantity={quantity}")
+
+    started = time.time()
     results = []
-    # 使用 ThreadPoolExecutor 創造 20 個同時運作的執行緒
-    with concurrent.futures.ThreadPoolExecutor(max_workers=NUM_REQUESTS) as executor:
-        # 將任務塞入執行緒池，模擬瞬間併發
-        futures = [executor.submit(send_assign_request, i) for i in range(1, NUM_REQUESTS + 1)]
-        
-        # 收集執行結果
+    with concurrent.futures.ThreadPoolExecutor(max_workers=requests_count) as executor:
+        futures = [
+            executor.submit(_send_assign, base_url, idx, quantity, timeout)
+            for idx in range(1, requests_count + 1)
+        ]
         for future in concurrent.futures.as_completed(futures):
             results.append(future.result())
+    elapsed = time.time() - started
 
-    end_time = time.time()
-    
-    # --- 整理與印出測試結果 ---
-    print(f"\n測試完成！總耗時: {end_time - start_time:.3f} 秒\n")
-    print("-" * 40)
-    
-    success_count = sum(1 for r in results if r["status"] == 200)
-    error_400_count = sum(1 for r in results if r["status"] == 400)
-    error_500_count = sum(1 for r in results if r["status"] == 500)
-    
-    for r in sorted(results, key=lambda x: x["req_id"]):
-        if r["status"] == 500:
-            print(f"請求 {r['req_id']:02d} | HTTP {r['status']} | 系統崩潰 (可能為 SQLite 鎖死)")
-        elif r["status"] == 200:
-            print(f"請求 {r['req_id']:02d} | HTTP {r['status']} | {r['response'].get('message', '')}")
-        else:
-            print(f"請求 {r['req_id']:02d} | HTTP {r['status']} | {r['response']}")
+    code_counter = Counter(str(item["status"]) for item in results)
+    print(f"總耗時: {elapsed:.3f}s")
+    print(f"狀態碼統計: {dict(code_counter)}")
 
-    print("-" * 40)
-    print(f"統計結果：")
-    print(f"  - 成功分配 (200): {success_count}")
-    print(f"  - 擋車或無空門 (400/409): {error_400_count}")
-    print(f"  - 系統內部錯誤 (500): {error_500_count}")
+    for item in sorted(results, key=lambda x: x["req_id"]):
+        print(f"req={item['req_id']:02d} status={item['status']} body={item['body']}")
+
+
+def case_return_timeout(base_url: str, timeout: int):
+    _print_header("[Case 3] 退件逾時：return-timeout")
+    url = f"{base_url}/api/doors/return-timeout"
+    print(f"POST {url}")
+
+    started = time.time()
+    resp = requests.post(url, timeout=timeout)
+    elapsed = time.time() - started
+
+    print(f"HTTP {resp.status_code} | {elapsed:.3f}s")
+    print(_safe_json(resp))
+
+
+def case_recall(base_url: str, timeout: int):
+    _print_header("[Case 4] 緊急召回：recall")
+    url = f"{base_url}/api/robot/recall"
+    print(f"POST {url}")
+
+    started = time.time()
+    resp = requests.post(url, timeout=timeout)
+    elapsed = time.time() - started
+
+    print(f"HTTP {resp.status_code} | {elapsed:.3f}s")
+    print(_safe_json(resp))
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Aurobox 0.4.0 load test scenarios")
+    parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help="API base url")
+    parser.add_argument("--timeout", type=int, default=8, help="request timeout seconds")
+    parser.add_argument("--quantity", type=int, default=2, help="quantity for quantity test")
+    parser.add_argument("--concurrency", type=int, default=20, help="request count for concurrent assign")
+    parser.add_argument("--concurrent-quantity", type=int, default=1, help="quantity for each concurrent assign")
+    parser.add_argument("--package-id", default=f"QTY_CASE_{int(time.time())}", help="package id for quantity case")
+    args = parser.parse_args()
+
+    print("Aurobox 0.4.0 load tests starting...")
+    print(f"base_url={args.base_url}")
+
+    case_assign_quantity(args.base_url, args.package_id, args.quantity, args.timeout)
+    case_assign_concurrent(args.base_url, args.concurrency, args.concurrent_quantity, args.timeout)
+    case_return_timeout(args.base_url, args.timeout)
+    case_recall(args.base_url, args.timeout)
+
 
 if __name__ == "__main__":
-    run_test()
+    main()

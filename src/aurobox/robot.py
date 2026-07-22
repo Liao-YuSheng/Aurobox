@@ -224,6 +224,14 @@ class FlashbotController:
         print("[系統] ⚠️ 輪詢超時，機器人可能卡在路上了！")
         return False
     
+    def custom_complete(self, payload: dict) -> dict:
+        """完成/消除當前的機器人任務畫面"""
+        return self.client.custom_complete(payload)
+    
+    def custom_call_cancel(self, payload: dict) -> dict:
+        """中斷任務並設定是否自動返航"""
+        return self.client.custom_call_cancel(payload)
+    
     def control_doors(self, sn: str | None, control_states: list) -> dict:
         physical_states = []
         

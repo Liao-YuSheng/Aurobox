@@ -39,7 +39,7 @@ class Door(db.Model):
     door_number = db.Column(db.String(10), nullable=False)  # 例如: H_01
     status = db.Column(db.String(20), nullable=False, default=DoorStatus.EMPTY.value)
     package_id = db.Column(db.String(100), nullable=True)   # 中央大腦指派的包裹 ID
-    task_id = db.Column(db.String(100), nullable=True)   # 當前機器人的任務 ID
+    # task_id = db.Column(db.String(100), nullable=True)   # 當前機器人的任務 ID
     
     updated_at = db.Column(db.DateTime, default=_utc_now_naive, onupdate=_utc_now_naive)
 
@@ -53,6 +53,7 @@ class RobotState(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     sn = db.Column(db.String(50), unique=True, nullable=False)
     last_point = db.Column(db.String(100), nullable=True, default="")
+    current_task_id = db.Column(db.String(100), nullable=True)
     
     updated_at = db.Column(db.DateTime, default=_utc_now_naive, onupdate=_utc_now_naive)
 

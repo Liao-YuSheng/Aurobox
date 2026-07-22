@@ -1,84 +1,175 @@
-# Aurobox Flashbot Hardware API
+# Aurobox 0.4.0 多包裹配送硬體控制層
 
-Aurobox 是一個聚焦在 Pudu Flashbot 的硬體控制層，提供對外 HTTP API 讓中央系統可進行派車、艙門控制與狀態查詢。
+Aurobox 是 Pudu Flashbot 的本地硬體控制服務，對中央系統提供 HTTP API，負責機器人導航、艙門批次控制、配送任務狀態同步與異常保護。
 
-目前版本重點是「最小本地狀態 + 外部中控整合」，不包含完整住戶互動流程、前端 Dashboard 或 LINE webhook。
-本次重大更新導入 PostgreSQL 與行級悲觀鎖（Row-level Lock），確保在多執行緒與高併發環境下不會發生艙門超賣（Overbooking）的競態條件。
+本版文件為 0.4.0 完整更新，主軸是「多包裹配送流程」，涵蓋從管理室批次裝貨、住戶端取件、退件返航到緊急召回的全流程。
 
-## 目前定位
+## 0.4.0 核心能力
 
-- 控制 Flashbot 移動、地圖呼叫與艙門開關。
-- 對外提供可整合的 Flask API。
-- 本地僅保存最小必要資料：`doors` 與 `robot_state`。
-- 整合 Pudu 多來源狀態並輸出統一摘要。
+- 多包裹分配：同一包裹可一次要求 quantity，多門同時分配。
+- 高併發防超賣：使用 PostgreSQL 搭配 with_for_update(skip_locked=True) 避免重複分配空門。
+- 批次艙門控制：支援一次開關多門。
+- 單機任務保護：配送中禁止重複派工，避免運送狀態衝突。
+- 背景輪詢與回呼：抵達後通知中央系統，並顯示 QR 取件畫面。
+- 完整退件流程：return、return-open、return-complete、return-timeout。
+- 緊急召回：取消當前任務後強制返航，並保護門狀態。
+- 3 門/4 門兼容：DOOR_MODE=3_DOORS 時，邏輯門 H_01 會同步對應實體 H_01 + H_02。
 
-## 系統架構
+## 系統邊界
+
+本專案只負責硬體控制層，不包含：
+
+- LINE Webhook 與住戶身分綁定
+- 完整訂單生命週期資料模型
+- 管理員前端 Dashboard 畫面
+
+## 架構總覽
 
 ```mermaid
 flowchart LR
   Central[中央系統] --> API[Flask API]
-  API --> DB[(PostgreSQL: doors, robot_state)]
-  API --> CTRL[FlashbotController]
-  CTRL --> PUDU[Pudu Open Platform]
-  PUDU --> ROBOT[Flashbot]
+  API --> DB[(PostgreSQL)]
+  API --> Controller[FlashbotController]
+  Controller --> Pudu[Pudu Open Platform]
+  API --> Tasks[Background Threads]
+  Tasks --> Central
 ```
 
 ## 專案結構
 
 ```text
 src/aurobox/
-├── api.py           # 對外路由
-├── app.py           # Flask app factory
-├── cli.py           # CLI 指令
-├── config.py        # .env 設定載入
+├── api.py           # 硬體流程 API（多包裹核心）
+├── app.py           # Flask app factory + 啟動初始化
+├── config.py        # .env 設定讀取
 ├── models.py        # Door / RobotState
-├── pudu_client.py   # Pudu API client + 簽章
+├── services.py      # 狀態寫入與空門返航
+├── tasks.py         # 背景輪詢、抵達通知、開門排程
 ├── robot.py         # FlashbotController
-├── services.py      # DB / 返航邏輯
-├── tasks.py         # 背景輪詢與通知
-└── utils.py         # payload 組裝工具
+├── pudu_client.py   # Pudu API client + HMAC 簽章
+├── utils.py         # custom_call payload 組裝
+└── cli.py           # CLI 工具
 
 scripts/
 ├── check_db.py
 └── read_maps_and_position.py
 
 tests/
-├── load_test.py
+├── test_pudu_client.py
 ├── test_api_integration.py
-└── test_pudu_client.py
-
-run.py
-pyproject.toml
-REPORT.md
+└── load_test.py
 ```
+
+## 門與任務狀態模型
+
+Door.status 支援：
+
+- empty：空門
+- assigned：已分配，等待管理員放貨
+- full：已放貨，待配送或退件中
+- picking：住戶正在取件
+
+RobotState：
+
+- last_point：最後記錄點位
+- current_task_id：目前任務 ID
+
+## 多包裹配送流程
+
+### 1) 分配空門
+
+呼叫 POST /api/packages/{package_id}/assign，可帶 quantity。
+
+- 若目前已有 full 門，回 409（機器人視為配送中）。
+- 以資料庫鎖挑選 needed_count 個 empty 門。
+- 若已有 assigned 任務，省略重複導航；否則先叫機器人回管理室。
+- 背景執行緒等待機器人到位後，依佇列逐門開門。
+
+### 2) 管理員裝貨
+
+呼叫 POST /api/doors/load。
+
+- 將所有 assigned 門批次關門。
+- 狀態轉為 full。
+
+### 3) 派送到住戶點位
+
+呼叫 POST /api/robot/dispatch。
+
+- 用 QR_CODE 模式派送。
+- 寫入 current_task_id。
+- 背景輪詢到站後回呼中央系統 packages/{id}/arrived。
+- 同步切換機器人畫面顯示 QR Code。
+
+### 4) 住戶掃碼與取件
+
+- POST /api/packages/{package_id}/pickup-complete：清除任務畫面並開門，門狀態轉 picking。
+- POST /api/packages/{package_id}/complete：關門後清空門；若全部為 empty，觸發返航。
+
+### 5) 取消與退件
+
+- POST /api/packages/{package_id}/cancel：關門，包裹保留為 full。
+- POST /api/packages/return：要求機器人回管理室。
+- POST /api/packages/return-open：管理室檢查時批次開啟啟用門。
+- POST /api/doors/return-complete：檢查完批次關門並清空。
+- POST /api/doors/return-timeout：退件開門逾時，強制批次關門。
+
+### 6) 緊急召回
+
+POST /api/robot/recall：
+
+- 取消目前 task_id
+- 等待硬體重置
+- 重新導航回管理室
+- 將 assigned/picking 一律保護成 full
+
+## API 一覽
+
+### 基礎
+
+- GET /
+- GET /healthz
+
+### 多包裹配送與艙門控制
+
+- POST /api/packages/{package_id}/assign
+- POST /api/packages/{package_id}/assign-timeout
+- POST /api/doors/load
+- POST /api/robot/dispatch
+- POST /api/packages/{package_id}/pickup-complete
+- POST /api/packages/{package_id}/complete
+- POST /api/packages/{package_id}/cancel
+- POST /api/packages/return
+- POST /api/packages/return-open
+- POST /api/doors/return-complete
+- POST /api/doors/return-timeout
+- POST /api/robot/recharge
+- POST /api/robot/recall
+- GET /api/dashboard/status
 
 ## 環境需求
 
 - Python 3.10+
-- requests >= 2.31.0
-- python-dotenv >= 1.0.0
-- flask >= 3.0.0
-- flask-sqlalchemy >= 3.0.0
-- python-dateutil >= 2.8.0
-- cryptography >= 41.0.0
+- PostgreSQL 14+
+- requests
+- flask
+- flask-sqlalchemy
+- python-dotenv
+- cryptography
+- psycopg2-binary
 
 ## 快速啟動
 
-1. 建立虛擬環境
+1. 建立虛擬環境並安裝
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-# Windows PowerShell: .venv\Scripts\Activate.ps1
-
 python -m pip install -e .
-# 若要安裝開發與測試工具： python -m pip install -e ".[dev]"
 ```
 
-2. 資料庫建置 (PostgreSQL)
-本專案強烈依賴 PostgreSQL 來處理高併發的硬體控制請求。請依照以下任一方式建置本地端資料庫：
+2. 啟動 PostgreSQL（Docker 範例）
 
-選項 A：使用 Docker 快速啟動（推薦）
 ```bash
 docker run --name aurobox-postgres \
   -e POSTGRES_USER=myuser \
@@ -87,131 +178,57 @@ docker run --name aurobox-postgres \
   -p 5432:5432 \
   -d postgres:15
 ```
-選項 B：Linux 原生安裝 (Ubuntu/Debian)
-```bash
-sudo apt update
-sudo apt install postgresql postgresql-contrib
-sudo systemctl start postgresql
-sudo systemctl enable postgresql
 
-# 進入控制台建立帳號與資料庫
-sudo -u postgres psql
-
-# 執行以下 SQL (請在 psql 提示字元下執行)：
-CREATE USER myuser WITH PASSWORD 'mypassword';
-CREATE DATABASE aurobox_db;
-GRANT ALL PRIVILEGES ON DATABASE aurobox_db TO myuser;
-ALTER DATABASE aurobox_db OWNER TO myuser;
-\c aurobox_db
-GRANT ALL ON SCHEMA public TO myuser;
-\q
-```
-
-3. 建立 `.env`
+3. 建立 .env（可由 .env.example 複製）
 
 ```env
-# Pudu API 憑證與機器人設定
 Pd_key=YOUR_PUDU_API_KEY
 Pd_secret=YOUR_PUDU_API_SECRET
 Aurotek_id=YOUR_SHOP_ID
 FLASHBOT_SN=8FF055923050007
 DEFAULT_MAP_NAME=YOUR_MAP_NAME
-HOME_POINT_NAME=閃閃充電
-
-# 資料庫連線 (對應步驟 2 的設定)
+HOME_POINT_NAME=office
+CHARGE_POINT_NAME=閃閃充電
+DOOR_MODE=4_DOORS
 DATABASE_URL=postgresql://myuser:mypassword@localhost:5432/aurobox_db
-
-# 中控系統連線
-CENTRAL_API_BASE_URL=[https://your-central-api.example.com](https://your-central-api.example.com)
+CENTRAL_API_BASE_URL=https://your-central-api.example.com
 ```
 
 4. 啟動服務
 
 ```bash
-python3 -u run.py --debug 2>&1 | tee -a instance/aurobox.log
+python3 -u run.py --debug
 ```
-如需外網穿透測試，可使用 `ngrok http 5000`
 
-預設監聽：`http://0.0.0.0:5000`
+預設服務位置：
 
-## API 一覽（依目前程式）
+- http://0.0.0.0:5000
 
-基礎：
-
-- `GET /`
-- `GET /healthz`
-
-硬體流程：
-
-- `POST /api/robot/recharge`​ #增
-  - 行為：​呼叫機器人回充電站。
-- `POST /api/packages/<package_id>/assign`​ #改
-  - 行為：找空艙門 (具備行級防超賣鎖)、呼叫機器人回管理室、背景輪詢抵達後開門。
-- `POST /api/packages/<package_id>/assign-timeout`​ #增
-  - 行為：空艙門打開後並沒有關門，視為未放貨，自動關門(仍為`empty`)。
-- `POST /api/doors/load`​
-  - 行為：關門，狀態從 `assigned` 轉 `full`。​
-- `POST /api/robot/dispatch`​
-  - 行為：派遣機器人到指定點位，背景輪詢並通知中央系統抵達、顯示QR Code。​
-- `POST /api/packages/<package_id>/pickup-complete`​
-  - 行為：關閉QR Code畫面並開啟對應艙門。​
-- `POST /api/packages/<package_id>/complete`​
-  - 行為：關門並清空艙門；若所有艙門皆空，觸發返航。​
-- `POST /api/packages/<package_id>/cancel`​
-  - 行為：關門、關閉任務畫面，包裹仍保留在艙門內（維持 `full`）。​
-- `POST /api/packages/return`​
-  - 行為：退回包裹回到管理室。​
-- `POST /api/packages/return-open`​
-  - 行為：回到管理室後釋放艙門。​
-- `POST /api/doors/return-complete`​
-  - 行為：拿出被退回的包裹後關閉艙門。​
-- `POST /api/doors/return-timeout`​ #增
-  - 行為：退貨開門後並沒有關門，視為還沒拿貨，自動關門(維持 `full`)。
-- `GET /api/dashboard/status` #還原
-  - 行為：回傳機器人即時狀態摘要與本地艙門狀態。
-  
-## CLI
+## CLI 範例
 
 ```bash
 aurobox --sn 8FF055923050007 status
 aurobox --sn 8FF055923050007 position
-aurobox --sn 8FF055923050007 recharge
 aurobox --sn 8FF055923050007 map-list
-aurobox --sn 8FF055923050007 door-state
-aurobox --shop-id YOUR_SHOP_ID open-map --map-name map1
+aurobox --sn 8FF055923050007 recharge
+aurobox --sn 8FF055923050007 --shop-id YOUR_SHOP_ID open-map --map-name map1
 aurobox --sn 8FF055923050007 --shop-id YOUR_SHOP_ID call --map-name map1 --point 閃閃充電
 ```
 
-## 狀態整合策略
+## 觀測與維運
 
-`FlashbotController.get_status_summary()` 會合併：
+- 指令紀錄：instance/robot_commands.log
+- DB 盤點腳本：scripts/check_db.py
+- Pudu 快速讀取：scripts/read_maps_and_position.py
 
-- `/pudu-entry/open-platform-service/v1/status/get_by_sn`
-- `/pudu-entry/open-platform-service/v2/status/get_by_sn`
-- `/pudu-entry/open-platform-service/v1/robot/task/state/get`
+## 測試現況
 
-並輸出統一欄位如 `state`、`move_state`、`run_state`、`task_state`、`battery_level`、`current_location`。
+- 自動化測試：pytest 結果為 4 passed, 1 skipped。
+- tests/test_api_integration.py：已對齊多包裹路由與現行資料模型。
+- tests/load_test.py：已升級為 4 個情境（quantity > 1、concurrent assign、return-timeout、recall）。
 
-## 測試
+## 版本對齊
 
-```bash
-pytest -q
-```
-
-目前測試涵蓋：
-
-- 設定載入與初始化（`tests/test_pudu_client.py`）
-- API 流程整合（`tests/test_api_integration.py`）
-  - `assign -> load`
-  - `dispatch`（含 task_id 寫入）
-  - `complete`
-  - `cancel`
-
-## 已知問題
-
-- 目前無阻擋性已知問題。
-
-## 版本資訊
-
-- 套件版本：`0.3.0`
-- 本次盤點報告：`REPORT.md`
+- 文件版次：0.4.0（多包裹配送完整更新）
+- 程式套件版號：0.4.0
+- 盤點報告：REPORT.md

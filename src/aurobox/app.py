@@ -38,7 +38,6 @@ def ensure_default_doors(app: Flask) -> None:
                 door_number=door_number,
                 status=DoorStatus.EMPTY.value,
                 package_id=None,
-                task_id=None
             )
         )
     
@@ -48,7 +47,6 @@ def ensure_default_doors(app: Flask) -> None:
     for door in doors:
         door.status = DoorStatus.EMPTY.value
         door.package_id = None
-        door.task_id = None
 
     if db.session.new or db.session.dirty:
         db.session.commit()

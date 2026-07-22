@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 import sys
 from pathlib import Path
-from datetime import timezone  # 新增：引入 timezone 模組
+from datetime import timezone
 
 # 將 src 加入系統路徑，這樣 Python 才能找到 aurobox 這個套件
 src_path = Path(__file__).parent.parent / 'src'
@@ -27,7 +27,7 @@ def main():
         else:
             print(f"目前共有 {len(doors)} 個艙門：")
             for door in doors:
-                print(f" - 門號: {door.door_number} | 狀態: {door.status} | 綁定包裹: {door.package_id} | Task: {door.task_id}")
+                print(f" - 門號: {door.door_number} | 狀態: {door.status} | 綁定包裹: {door.package_id}")
         
         print("-" * 50)
 
@@ -47,6 +47,7 @@ def main():
                     
                 print(f" - 機器人 SN: {state.sn}")
                 print(f" - 最後紀錄點位: {state.last_point}")
+                print(f" - 當前任務 ID: {state.current_task_id}")
                 print(f" - 資料更新時間: {time_str}")
                 
         print("="*50)

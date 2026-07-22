@@ -71,7 +71,7 @@ def _poll_notify_display_qr(
     controller,
     sn: str,
     package_id: str,
-    task: str = None,
+    task_id: str = None,
     timeout_seconds: int = timeout_seconds,
     poll_interval: int = 5,
 ) -> None:
@@ -104,13 +104,13 @@ def _poll_notify_display_qr(
         except Exception as e:
             print(f"[系統] 抵達通知失敗: {e}  →  {url}", flush=True)
 
-        if task:
-            print(f"[系統] 抵達定點，準備顯示 QR Code (Task ID: {task})", flush=True)
+        if task_id:
+            print(f"[系統] 抵達定點，準備顯示 QR Code (Task ID: {task_id})", flush=True)
             payload_qr = {
                 "sn": sn,
                 "payload": {
                     "call_mode": "QR_CODE",
-                    "task_id": task,
+                    "task_id": task_id,
                     "mode_data": {
                         "qrcode": package_id,
                         "text": "請掃描 QR Code 取件"
