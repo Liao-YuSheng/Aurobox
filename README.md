@@ -132,20 +132,20 @@ POST /api/robot/recall：
 
 ### 多包裹配送與艙門控制
 
-- POST /api/packages/{package_id}/assign
-- POST /api/packages/{package_id}/assign-timeout
-- POST /api/doors/load
-- POST /api/robot/dispatch
-- POST /api/packages/{package_id}/pickup-complete
-- POST /api/packages/{package_id}/complete
-- POST /api/packages/{package_id}/cancel
-- POST /api/packages/return
-- POST /api/packages/return-open
-- POST /api/doors/return-complete
-- POST /api/doors/return-timeout
-- POST /api/robot/recharge
-- POST /api/robot/recall
-- GET /api/dashboard/status
+- POST /api/packages/{package_id}/assign：分配 1~N 個空門給指定包裹，必要時呼叫機器人回管理室，抵達後由背景執行緒開門。
+- POST /api/packages/{package_id}/assign-timeout：裝貨逾時處理，關閉仍為 assigned 的門並釋放為 empty。
+- POST /api/doors/load：管理員確認裝貨後，將所有 assigned 門批次關門並轉為 full。
+- POST /api/robot/dispatch：派送到住戶點位，寫入 task_id，背景輪詢抵達後通知中央並顯示 QR。
+- POST /api/packages/{package_id}/pickup-complete：住戶掃碼通過後，清除任務畫面並開啟該包裹對應門，狀態轉為 picking。
+- POST /api/packages/{package_id}/complete：住戶取件完成後關門、釋放該包裹門；若全空則觸發返航。
+- POST /api/packages/{package_id}/cancel：取消/拒收時關門並保留為 full，包裹留在機器人上。
+- POST /api/packages/return：要求機器人將退件包裹帶回管理室。
+- POST /api/packages/return-open：回到管理室後，批次開啟啟用門供人工檢查與取件。
+- POST /api/doors/return-complete：管理員確認取出後，批次關門並清空門狀態。
+- POST /api/doors/return-timeout：退件檢查逾時時，強制批次關門避免長時間開門。
+- POST /api/robot/recharge：僅在所有門為 empty 時允許回充，避免帶貨回充。
+- POST /api/robot/recall：緊急中斷任務並返航，將 assigned/picking 狀態保護成 full。
+- GET /api/dashboard/status：回傳機器人即時狀態摘要與目前啟用門狀態。
 
 ## 環境需求
 
@@ -168,7 +168,9 @@ source .venv/bin/activate
 python -m pip install -e .
 ```
 
-2. 啟動 PostgreSQL（Docker 範例）
+2. 啟動 PostgreSQL
+
+Docker 快速啟動（推薦）
 
 ```bash
 docker run --name aurobox-postgres \
@@ -177,6 +179,26 @@ docker run --name aurobox-postgres \
   -e POSTGRES_DB=aurobox_db \
   -p 5432:5432 \
   -d postgres:15
+```
+
+Linux 原生安裝（Ubuntu / Debian）
+
+```bash
+sudo apt update
+sudo apt install -y postgresql postgresql-contrib
+sudo systemctl enable postgresql
+sudo systemctl start postgresql
+
+# 建立使用者與資料庫
+sudo -u postgres psql -c "CREATE USER myuser WITH PASSWORD 'mypassword';"
+sudo -u postgres psql -c "CREATE DATABASE aurobox_db OWNER myuser;"
+sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE aurobox_db TO myuser;"
+```
+
+可用以下指令驗證 PostgreSQL 狀態：
+
+```bash
+sudo systemctl status postgresql --no-pager
 ```
 
 3. 建立 .env（可由 .env.example 複製）
