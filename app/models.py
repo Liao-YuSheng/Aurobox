@@ -85,9 +85,10 @@ class TaskLog(Base):
     # / arrived / pickup_opened / pickup_open_failed / completed / complete_failed
     # / returned_timeout / returned / cancel_task_failed / returned_and_opened / return_failed
     # / door_closed / close_door_failed / notify_failed / voided_acknowledged / redispatched / case_closed
-    # / line_binding_deleted / return_door_opened / return_door_open_failed / pending_pickup_notified
+    # / line_binding_deleted / line_binding_updated / return_door_opened / return_door_open_failed / pending_pickup_notified
     # / pickup_requested / trip_completed / user_unfollowed
     # / robot_recharge_requested / robot_recharge_failed
+    # / robot_recall_requested / robot_recall_failed
     # / assign_timeout / assign_timeout_failed / return_timeout / return_timeout_failed
     # / poll_returned_failed
     # / force_resolved

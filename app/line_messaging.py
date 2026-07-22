@@ -33,10 +33,10 @@ def push_arrival_notification(line_user_id: str, package_id: str, unit: str, qua
     ]
     if quantity > 1:
         body_contents.append(
-            {"type": "text", "text": f"共 {quantity} 件包裹，將一起處理、一次取貨", "wrap": True, "size": "sm", "color": "#029C4D"}
+            {"type": "text", "text": f"共 {quantity} 件包裹，將一次出貨", "wrap": True, "size": "sm", "color": "#029C4D"}
         )
     body_contents.append(
-        {"type": "text", "text": "※ 預約取貨僅開放整點時段，系統會自動進位到下一個整點作為時段起點（例如選2:15，會變成3:00-4:00這個時段）", "size": "xs", "color": "#999999", "wrap": True, "margin": "md"}
+        {"type": "text", "text": "※ 預約取貨僅開放整點時段，系統會自動進位到下一個整點作為時段起點", "size": "xs", "color": "#999999", "wrap": True, "margin": "md"}
     )
 
     contents = {
@@ -140,7 +140,7 @@ def push_status_update(line_user_id: str, text: str):
 
 def push_arrived_notification(line_user_id: str, package_id: str, quantity: int = 1):
     """機器人抵達時，推播提醒+開啟掃碼+拒收按鈕"""
-    body_text = "請於 10 分鐘內完成取貨" if quantity <= 1 else f"共{quantity}件包裹，掃描後將一次開啟{quantity}個艙門，請於 10 分鐘內完成取貨"
+    body_text = "請於 10 分鐘內完成取貨" if quantity <= 1 else f"共{quantity}件包裹，掃描後將開啟{quantity}個艙門，請於 10 分鐘內完成取貨"
     contents = {
         "type": "bubble",
         "header": {
@@ -198,7 +198,7 @@ def push_arrived_notification(line_user_id: str, package_id: str, quantity: int 
 
 def push_pickup_complete_button(line_user_id: str, package_id: str, quantity: int = 1):
     """掃碼驗證通過、艙門已開啟後，推播讓用戶確認取貨完成的按鈕"""
-    body_text = "艙門已開啟，請取出您的包裹" if quantity <= 1 else f"{quantity}個艙門已開啟，請取出您的{quantity}件包裹"
+    body_text = "艙門已開啟，請取出包裹" if quantity <= 1 else f"{quantity}個艙門已開啟，請取出{quantity}件包裹"
     contents = {
         "type": "bubble",
         "body": {
@@ -278,9 +278,9 @@ def reply_my_packages_text(reply_token: str, packages: list):
             has_returned_or_voided = True
             if package.pending_pickup_notified_at:
                 deadline = package.pending_pickup_notified_at + timedelta(hours=VOID_DEADLINE_HOURS)
-                block += f"\n   ⚠️ 將於 {deadline.strftime('%m月%d日%H時')} 由管理員作廢，請盡快處理"
+                block += f"\n   將於 {deadline.strftime('%m月%d日%H時')} 由管理員作廢，請盡快處理"
             else:
-                block += "\n   ⚠️ 作廢時間尚未確定，請盡快聯繫管理室"
+                block += "\n   作廢時間尚未確定，請盡快聯繫管理室"
         elif package.status == "voided":
             has_returned_or_voided = True
 
