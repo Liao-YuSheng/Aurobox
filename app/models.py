@@ -94,6 +94,7 @@ class TaskLog(Base):
     # / force_resolved
     # / pickup_scheduled
     # / multi_package_assigned
+    # / task_recalled / package_deleted
     level = Column(String(10), nullable=False, default="info")  # info / warning / error
     detail = Column(String(500), nullable=True)
     created_at = Column(DateTime, default=now_taipei)

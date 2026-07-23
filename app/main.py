@@ -2,7 +2,7 @@
 LINE 後端 - 主程式入口
 """
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, List
 import uuid
 import requests
 
@@ -26,7 +26,6 @@ from app.line_messaging import (
     push_arrival_notification,
     push_status_update,
     push_arrived_notification,
-    push_pickup_complete_button,
     reply_my_packages_text,
 )
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -872,6 +871,65 @@ async def admin_list_packages(
     }
 
 
+class DeletePackagesRequest(BaseModel):
+    package_ids: List[str]
+
+
+@app.post("/admin/packages/delete")
+async def delete_packages(payload: DeletePackagesRequest, db: Session = Depends(get_db)):
+    """
+    管理員在包裹清單勾選多筆後按「刪除已選」：直接從資料庫刪除這些包裹紀錄
+    （連同對應的收件人綁定PackageRecipient）。這是硬刪除，刪掉就真的消失，
+    跟系統裡其他操作（都是改status、留紀錄）完全不同，所以只讓管理員手動、
+    明確勾選才能觸發，且每一筆都會在刪除前寫一筆task_log存證。
+
+    安全限制：不允許刪除「艙門還在使用中、任務還沒走完」的包裹，判斷方式是：
+    - status是pickup_now（已指派艙門）／delivering／arrived：艙門正在使用中
+    - status是rejected_at_door／returned_timeout，但door_closed_at還沒設：
+      機器人已經把包裹帶回來但艙門還沒被管理員關過，也算還在使用中
+    這種包裹背後對應機器人身上一個實際開著/關著的艙門，資料庫紀錄消失但
+    硬體狀態沒有跟著清掉，之後會對不起來、變成查無來源的艙門佔用。要刪除
+    這種包裹，請先用「叫回機器人」或走完正常流程把艙門釋放掉，再回來刪除。
+    completed／voided／已經door_closed_at的退回包裹，door_id即使還留著門號
+    也只是歷史紀錄，不是實際佔用中，可以直接刪除。
+    """
+    if not payload.package_ids:
+        raise HTTPException(status_code=400, detail="沒有指定要刪除的包裹")
+
+    deleted = []
+    skipped = []
+    for pid in payload.package_ids:
+        parsed = parse_package_uuid(pid)
+        if parsed is None:
+            skipped.append({"id": pid, "reason": "格式不正確"})
+            continue
+
+        package = db.query(Package).filter(Package.id == parsed).first()
+        if not package:
+            skipped.append({"id": pid, "reason": "找不到這筆包裹"})
+            continue
+
+        door_in_use = (
+            (package.status in ("pickup_now", "delivering", "arrived") and package.door_id is not None)
+            or (package.status in ("rejected_at_door", "returned_timeout") and package.door_closed_at is None)
+        )
+        if door_in_use:
+            skipped.append({"id": pid, "reason": "艙門仍在使用中，請先叫回機器人或完成派送流程後再刪除"})
+            continue
+
+        log_event(
+            db, "package_deleted",
+            detail=f"unit={package.unit} status={package.status} 管理員手動刪除此筆紀錄",
+            package_id=package.id,
+        )
+        db.query(PackageRecipient).filter(PackageRecipient.package_id == package.id).delete()
+        db.delete(package)
+        deleted.append(pid)
+
+    db.commit()
+    return {"status": "ok", "deleted": deleted, "skipped": skipped}
+
+
 @app.get("/admin/packages/live")
 async def admin_live_packages(db: Session = Depends(get_db)):
     """
@@ -1063,20 +1121,47 @@ async def admin_robot_recall(db: Session = Depends(get_db)):
     管理員緊急工具：叫回機器人、終止目前任務——不管機器人現在正在執行什麼
     （配送中、返回中等），強制中斷並叫它回管理室。
 
-    這是硬體層級的緊急指令，刻意不去更新任何package的狀態或欄位：
-    呼叫當下我們沒辦法可靠判斷機器人「被終止的那一刻」正卡在哪個包裹的
-    哪個階段，貿然去改package狀態風險比不改更高，容易讓資料庫紀錄
-    跟實際硬體狀況兜不起來。管理員按下這個之後，建議接著用「開啟艙門」
-    實際檢查機器人身上還留有哪些包裹，再視情況手動處理（例如到例外
-    處理頁重新派貨）。
+    連帶把所有還在進行中的包裹任務（pickup_now已指派艙門／delivering／arrived）
+    重置為「待派送」，原本指派的艙門一併清空。這裡不去猜機器人被打斷那一刻
+    卡在哪個包裹的哪個階段——因為呼叫這支之後，不管原本在哪個階段，結果都一樣
+    是機器人放棄原有任務、回管理室，所以統一重置最準確，不需要逐筆判斷。
+
+    重置之後，管理員應接著用機器人狀態欄的「開啟艙門／關閉艙門」實際檢查
+    機器人身上還留有哪些包裹並清空，再回到包裹清單重新「放置包裹→全部派送」。
+
+    不重置：completed（已完成）、returned_timeout／rejected_at_door
+    （本來就是走退回流程，回管理室是它們原定的下一步，不受這次叫回影響）、
+    voided／pending（本來就沒有指派艙門，跟這次叫回無關）。
     """
     ok, resp, error = call_robot_api("POST", "/api/robot/recall", retries=1)
     if not ok:
         log_event(db, "robot_recall_failed", detail=error, level="error")
         raise HTTPException(status_code=502, detail=f"呼叫機器人叫回失敗: {error}")
 
-    log_event(db, "robot_recall_requested", detail="管理員手動叫回機器人、終止目前任務")
-    return {"status": "ok"}
+    affected = (
+        db.query(Package)
+        .filter(Package.status.in_(("pickup_now", "delivering")))
+        .filter(Package.door_id.isnot(None))
+        .all()
+    )
+    for package in affected:
+        log_event(
+            db, "task_recalled",
+            detail=f"機器人緊急叫回，從 {package.status} 重置為 pickup_now，原艙門 {package.door_id} 已清空",
+            package_id=package.id,
+        )
+        package.status = "pickup_now"
+        package.door_id = None
+        package.door_assigned_at = None
+        package.stop_dispatched_at = None
+        package.arrived_at = None
+    db.commit()
+
+    log_event(
+        db, "robot_recall_requested",
+        detail=f"管理員手動叫回機器人、終止目前任務，連帶重置 {len(affected)} 筆包裹任務",
+    )
+    return {"status": "ok", "reset_count": len(affected)}
 
 
 @app.post("/admin/robot/recharge")
@@ -1410,6 +1495,29 @@ async def pickup_verify(package_id: str, payload: PickupVerifyRequest = None, db
     if scanning_user_id not in get_recipients(db, package_id):
         raise HTTPException(status_code=403, detail="您不是這筆包裹的收件人，無法取貨")
 
+    # 上面這些驗證步驟（尤其是呼叫LINE驗證id_token）需要一點時間，這段期間
+    # 如果同戶的另一位收件人在別的手機上按了拒收，狀態可能已經變了。
+    # 這裡鎖住這一列、重新讀一次最新狀態，確認還是「arrived」才真的去開門，
+    # 把一開始那個沒有鎖保護的狀態檢查，跟真正決定開門這一刻之間的時間差關掉。
+    # 用nowait=True鎖不到就立刻失敗，不要傻等卡住整個事件迴圈。
+    try:
+        db.refresh(package, with_for_update={"nowait": True})
+    except OperationalError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="這筆包裹正在被其他操作處理中，請稍候再試")
+
+    if package.status != "arrived":
+        db.rollback()
+        raise HTTPException(
+            status_code=400,
+            detail=f"這筆包裹目前狀態是 {package.status}，不是等待取貨的狀態",
+        )
+
+    # 這裡沒有要改任何欄位，純粹確認完狀態就結束交易放掉鎖——機器人開門這個
+    # 比較慢的外部呼叫刻意留在鎖外面執行，避免鎖住這一列太久，卡住排程或
+    # 管理員對同一筆包裹的其他操作。
+    db.commit()
+
     ok, resp, error = call_robot_api(
         "POST", f"/api/packages/{package_id}/pickup-complete", retries=1
     )
@@ -1417,19 +1525,16 @@ async def pickup_verify(package_id: str, payload: PickupVerifyRequest = None, db
         log_event(db, "pickup_open_failed", detail=error, package_id=package.id, level="error")
         raise HTTPException(status_code=502, detail="機器人開門失敗，請聯繫管理員協助取件")
 
-    # 機器人開門這個關鍵動作已經成功了，接下來記log、推播「取貨完成」按鈕都只是附加動作，
-    # 就算這段出錯，也不該讓整個request變成500回給LIFF——住戶端看到的應該還是
-    # 「門已經開了」的成功畫面，附加動作失敗頂多在後台log裡看得到，不影響住戶體驗。
+    # 機器人開門這個關鍵動作已經成功了，記log只是附加動作，就算這段出錯，
+    # 也不該讓整個request變成500回給LIFF——住戶端看到的應該還是「門已經開了」
+    # 的成功畫面，附加動作失敗頂多在後台log裡看得到，不影響住戶體驗。
+    #
+    # 不再推播「取貨完成」按鈕：改成LIFF頁面掃描驗證成功後，直接在同一頁
+    # 顯示「取貨完成」鍵，住戶不用切回LINE聊天室再點一次，體驗上少一個步驟。
     try:
         log_event(db, "pickup_opened", detail=f"scanned_by={scanning_user_id}", package_id=package.id)
-
-        for line_user_id in get_recipients(db, package_id):
-            try:
-                push_pickup_complete_button(line_user_id, str(package.id), package.package_count)
-            except Exception as e:
-                log_event(db, "notify_failed", detail=f"推播取貨完成按鈕失敗: {e}", package_id=package.id, level="error")
     except Exception as e:
-        print(f"[pickup_verify] 開門成功後的log/推播流程發生未預期例外: {e}")
+        print(f"[pickup_verify] 開門成功後的log流程發生未預期例外: {e}")
 
     return {"status": "ok", "message": "驗證通過，艙門已開啟"}
 
@@ -1891,6 +1996,56 @@ async def close_case(package_id: str, db: Session = Depends(get_db)):
 
     return {"status": "ok", "package_id": str(package.id)}
 
+
+class CloseCasesRequest(BaseModel):
+    package_ids: List[str]
+
+
+@app.post("/admin/packages/close-case-batch")
+async def close_cases_batch(payload: CloseCasesRequest, db: Session = Depends(get_db)):
+    """
+    例外處理頁：勾選多筆後按「全部銷案」，邏輯跟單筆close_case完全一樣，
+    只是包成迴圈一次處理多筆。每一筆各自檢查，不符合資格的記下原因、
+    跳過不動，不會因為其中一筆不符合就讓整批都失敗。
+    """
+    if not payload.package_ids:
+        raise HTTPException(status_code=400, detail="沒有指定要銷案的包裹")
+
+    closed = []
+    skipped = []
+    for pid in payload.package_ids:
+        parsed = parse_package_uuid(pid)
+        if parsed is None:
+            skipped.append({"id": pid, "reason": "格式不正確"})
+            continue
+
+        package = db.query(Package).filter(Package.id == parsed).first()
+        if not package:
+            skipped.append({"id": pid, "reason": "找不到這筆包裹"})
+            continue
+
+        if package.status not in EXCEPTION_STATUSES:
+            skipped.append({"id": pid, "reason": f"狀態是{package.status}，不是可以銷案的失敗/退回狀態"})
+            continue
+
+        resolved = (package.acknowledged_at is not None) if package.status == "voided" \
+            else (package.door_closed_at is not None)
+        if not resolved:
+            skipped.append({"id": pid, "reason": "尚未在主畫面完成確認/關門"})
+            continue
+
+        if package.case_closed_at is not None:
+            skipped.append({"id": pid, "reason": "已經銷案過了"})
+            continue
+
+        package.case_closed_at = now_taipei()
+        log_event(db, "case_closed", package_id=package.id)
+        closed.append(pid)
+
+    db.commit()
+    return {"status": "ok", "closed": closed, "skipped": skipped}
+
+
 @app.post("/packages/{package_id}/redispatch")
 async def redispatch_package(package_id: str, db: Session = Depends(get_db)):
     """
@@ -2078,6 +2233,7 @@ LIFF_SCAN_HTML = """
   <h2>掃描機器人上的 QR Code</h2>
   <p>請對準機器人螢幕上顯示的 QR Code 進行掃描</p>
   <button id="scanBtn" onclick="startScan()">開啟相機掃描</button>
+  <button id="completeBtn" style="display:none;" onclick="completePickup()">取貨完成</button>
   <div id="message"></div>
 
   <script>
@@ -2123,17 +2279,46 @@ LIFF_SCAN_HTML = """
             }
 
             messageEl.style.color = "green";
-            messageEl.textContent = "驗證成功！艙門已開啟，請取出您的包裹。";
-            // 掃描成功、門已經開了，不需要再掃第二次，按鈕改成完成狀態並鎖住
-            btn.textContent = "掃描完成";
-            btn.disabled = true;
-            btn.style.background = "#999";
+            messageEl.textContent = "驗證成功！艙門已開啟，請取出您的包裹，取出後請按下方按鈕關門。";
+            // 掃描成功、門已經開了，不需要再掃第二次；改顯示「取貨完成」鍵，
+            // 不再依賴LINE推播，住戶直接在這一頁按下去就會關門
+            btn.style.display = "none";
+            const completeBtn = document.getElementById("completeBtn");
+            completeBtn.style.display = "block";
         } catch (e) {
             messageEl.style.color = "red";
             messageEl.textContent = "掃描失敗：" + e.message;
             // 失敗要讓使用者能重新掃，按鈕維持原本可點的「開啟相機掃描」
             btn.textContent = "開啟相機掃描";
             btn.disabled = false;
+        }
+        }
+
+    async function completePickup() {
+        const messageEl = document.getElementById("message");
+        const btn = document.getElementById("completeBtn");
+        btn.disabled = true;
+        btn.textContent = "處理中...";
+        try {
+            const response = await fetch(`/packages/${packageId}/complete`, {
+            method: "POST",
+            });
+
+            if (!response.ok) {
+            const err = await response.json();
+            throw new Error(err.detail || "取貨完成失敗");
+            }
+
+            messageEl.style.color = "green";
+            messageEl.textContent = "取貨完成！感謝使用，艙門已關閉。";
+            btn.textContent = "已完成";
+            btn.style.background = "#999";
+        } catch (e) {
+            messageEl.style.color = "red";
+            messageEl.textContent = "取貨完成失敗：" + e.message + "，請重新整理頁面再試一次，或聯繫管理員";
+            // 失敗要讓使用者能重試，鎖住的按鈕解開
+            btn.disabled = false;
+            btn.textContent = "取貨完成";
         }
         }
 
@@ -2212,6 +2397,21 @@ ADMIN_DASHBOARD_HTML = """
   .door-EMPTY { background: #e9ecef; color: #666; }
   .door-ASSIGNED { background: #fff3cd; color: #856404; }
   .door-FULL { background: #f8d7da; color: #721c24; }
+  .pkg-select-checkbox, #selectAllCheckbox {
+    appearance: none; -webkit-appearance: none;
+    width: 22px; height: 22px; border: 2px solid #ccc; border-radius: 7px;
+    cursor: pointer; position: relative; vertical-align: middle; margin: 0;
+  }
+  .pkg-select-checkbox:checked, #selectAllCheckbox:checked {
+    background: #E2231A; border-color: #E2231A;
+  }
+  .pkg-select-checkbox:checked::after, #selectAllCheckbox:checked::after {
+    content: ''; position: absolute; left: 7px; top: 3px;
+    width: 5px; height: 10px; border: solid white; border-width: 0 2px 2px 0;
+    transform: rotate(45deg);
+  }
+  tr.selectable-row { cursor: pointer; }
+  tr.selectable-row:hover { background: #fff5f5; }
 </style>
 </head>
 <body>
@@ -2230,13 +2430,13 @@ ADMIN_DASHBOARD_HTML = """
     <div class="create-package-selects">
       <select id="unitSelect"><option value="">請選擇門牌</option></select>
       <select id="nameSelect"><option value="">請先選擇門牌</option></select>
+      <select id="qtySelect">
+        <option value="1">1件</option>
+        <option value="2">2件</option>
+        <option value="3">3件</option>
+        <option value="4">4件</option>
+      </select>
     </div>
-    <select id="quantitySelect" style="flex-shrink:0;width:90px;">
-      <option value="1">1件</option>
-      <option value="2">2件</option>
-      <option value="3">3件</option>
-      <option value="4">4件</option>
-    </select>
     <button id="createBtn" onclick="createPackage()">建立包裹並通知</button>
   </div>
   <div id="createMsg"></div>
@@ -2276,7 +2476,9 @@ ADMIN_DASHBOARD_HTML = """
     </div>
   </div>
   <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap;">
-    <label style="font-size:13px;color:#888;">建立時間：</label>
+    <button id="selectModeBtn" class="secondary" style="margin-left:0;" onclick="toggleSelectMode()">選取</button>
+    <button id="deleteSelectedBtn" style="display:none;background:#dc3545;margin-left:0;" onclick="deleteSelectedPackages()" disabled>刪除已選（0）</button>
+    <label style="font-size:13px;color:#888;margin-left:8px;">建立時間：</label>
     <input type="date" id="packageDateFrom" style="height:36px;padding:0 8px;border-radius:6px;border:1px solid #ccc;font-size:14px;box-sizing:border-box;" />
     <span style="color:#888;">至</span>
     <input type="date" id="packageDateTo" style="height:36px;padding:0 8px;border-radius:6px;border:1px solid #ccc;font-size:14px;box-sizing:border-box;" />
@@ -2287,7 +2489,10 @@ ADMIN_DASHBOARD_HTML = """
   </div>
   <div id="unitQueryResult" style="margin-bottom:12px;"></div>
   <table>
-    <thead><tr><th>門牌</th><th>狀態</th><th>艙門</th><th>建立時間</th><th>預約時間</th><th>操作</th></tr></thead>
+    <thead><tr>
+      <th id="selectColHeader" style="display:none;width:30px;"><input type="checkbox" id="selectAllCheckbox" onchange="toggleSelectAll(this)" /></th>
+      <th>門牌</th><th>狀態</th><th>艙門</th><th>建立時間</th><th>預約時間</th><th>操作</th>
+    </tr></thead>
     <tbody id="packageTableBody"><tr><td colspan="6">載入中...</td></tr></tbody>
   </table>
   <div style="display:flex;align-items:center;justify-content:flex-end;gap:16px;margin-top:10px;font-size:13px;color:#888;">
@@ -2456,7 +2661,7 @@ document.getElementById('unitSelect').addEventListener('change', updateNameOptio
 async function createPackage() {
   const unit = document.getElementById('unitSelect').value;
   const recipient_name = document.getElementById('nameSelect').value;
-  const quantity = parseInt(document.getElementById('quantitySelect').value, 10) || 1;
+  const quantity = parseInt(document.getElementById('qtySelect').value, 10);
   const msgEl = document.getElementById('createMsg');
   const btn = document.getElementById('createBtn');
   if (!unit) { msgEl.style.color = 'red'; msgEl.textContent = '請先選擇門牌'; return; }
@@ -2472,6 +2677,7 @@ async function createPackage() {
     });
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.detail || '建立失敗');
+
     if (data.notify_failed && data.notify_failed.length > 0) {
       msgEl.style.color = '#b58105';
       msgEl.textContent = `建立成功，已通知 ${data.notified_count} 位住戶，但 ${data.notify_failed.join('、')} 通知失敗（請確認LINE綁定是否正常）`;
@@ -2479,10 +2685,13 @@ async function createPackage() {
       msgEl.style.color = 'green';
       msgEl.textContent = `建立成功，已通知 ${data.notified_count} 位住戶`;
     }
+
+    document.getElementById('qtySelect').value = '1';   // ← 成功後重置件數
     loadPackages();
   } catch (e) {
     msgEl.style.color = 'red';
     msgEl.textContent = '錯誤：' + e.message;
+    // 失敗不重置件數，維持原本選的值方便重試
   } finally {
     btn.disabled = false;
     btn.textContent = '建立包裹並通知';
@@ -2501,6 +2710,8 @@ let currentPackagePage = 1;
 let packagePageTotal = 0;
 let activeDateFrom = '';
 let activeDateTo = '';
+let selectMode = false;
+let selectedPackageIds = new Set();
 
 async function refreshAll() {
   // 整頁唯一的重新整理鍵：一次刷新機器人狀態、包裹清單/異常提示框、
@@ -2545,12 +2756,12 @@ async function loadPackageTablePage() {
   } catch (e) {
     // fetch本身失敗，或後端回傳的不是合法JSON（例如500的原始錯誤文字）
     document.getElementById('packageTableBody').innerHTML =
-      `<tr><td colspan="6" style="color:red">載入失敗：${e.message}</td></tr>`;
+      `<tr><td colspan="${selectMode ? 7 : 6}" style="color:red">載入失敗：${e.message}</td></tr>`;
     return;
   }
   if (!resp.ok) {
     document.getElementById('packageTableBody').innerHTML =
-      `<tr><td colspan="6" style="color:red">載入失敗：${data.detail || '未知錯誤'}</td></tr>`;
+      `<tr><td colspan="${selectMode ? 7 : 6}" style="color:red">載入失敗：${data.detail || '未知錯誤'}</td></tr>`;
     return;
   }
   packagePageTotal = data.total;
@@ -2607,8 +2818,10 @@ function renderPackageTable(pageItems, totalPages) {
   const prevBtn = document.getElementById('packagePrevBtn');
   const nextBtn = document.getElementById('packageNextBtn');
 
+  const colCount = selectMode ? 7 : 6;
+
   if (packagePageTotal === 0) {
-    tbody.innerHTML = '<tr><td colspan="6">目前沒有包裹</td></tr>';
+    tbody.innerHTML = `<tr><td colspan="${colCount}">目前沒有包裹</td></tr>`;
     infoEl.textContent = '';
     setPackagePagerLinkState(prevBtn, true);
     setPackagePagerLinkState(nextBtn, true);
@@ -2618,6 +2831,9 @@ function renderPackageTable(pageItems, totalPages) {
   const now = new Date();
 
   tbody.innerHTML = pageItems.map(p => {
+    const checkboxCell = selectMode
+      ? `<td><input type="checkbox" class="pkg-select-checkbox" data-id="${p.id}" ${selectedPackageIds.has(p.id) ? 'checked' : ''} onchange="togglePackageSelect('${p.id}', this.checked)" /></td>`
+      : '';
     const label = STATUS_LABEL[p.status] || p.status;
     const createdAt = p.created_at ? p.created_at.replace('T', ' ').slice(0, 16) : '-';
     const door = p.door_id || '尚未分配';
@@ -2658,7 +2874,11 @@ function renderPackageTable(pageItems, totalPages) {
       ? `${p.unit} <span style="background:#e3f2fd;color:#0d47a1;padding:1px 6px;border-radius:8px;font-size:11px;">${p.package_count}件</span>`
       : p.unit;
 
-    return `<tr style="${rowStyle}">
+    const rowClass = selectMode ? 'selectable-row' : '';
+    const rowClick = selectMode ? ` onclick="handleRowClick(event, '${p.id}')"` : '';
+
+    return `<tr class="${rowClass}" style="${rowStyle}"${rowClick}>
+      ${checkboxCell}
       <td>${unitCell}</td>
       <td><span class="status-badge status-${p.status}">${label}</span></td>
       <td>${door}</td><td>${createdAt}</td><td>${scheduledCell}</td><td>${action}</td>
@@ -2668,6 +2888,103 @@ function renderPackageTable(pageItems, totalPages) {
   infoEl.textContent = `共 ${packagePageTotal} 筆，第 ${currentPackagePage} / 共 ${totalPages} 頁`;
   setPackagePagerLinkState(prevBtn, currentPackagePage === 1);
   setPackagePagerLinkState(nextBtn, currentPackagePage === totalPages);
+}
+
+function toggleSelectMode() {
+  if (selectMode) {
+    exitSelectMode();
+    loadPackageTablePage();
+    return;
+  }
+  selectMode = true;
+  document.getElementById('selectColHeader').style.display = 'table-cell';
+  document.getElementById('selectModeBtn').textContent = '取消選取';
+  document.getElementById('deleteSelectedBtn').style.display = 'inline-block';
+  updateDeleteButtonState();
+  loadPackageTablePage();
+}
+
+function exitSelectMode() {
+  // 只重設選取狀態本身，不在這裡重新抓資料——呼叫端（取消選取按鈕／刪除完成後）
+  // 各自決定要不要重抓，避免同一次操作重複打兩次API
+  selectMode = false;
+  selectedPackageIds.clear();
+  document.getElementById('selectColHeader').style.display = 'none';
+  document.getElementById('selectModeBtn').textContent = '選取';
+  document.getElementById('deleteSelectedBtn').style.display = 'none';
+  updateDeleteButtonState();
+}
+
+function handleRowClick(event, id) {
+  // 點到checkbox、按鈕這些互動元件本身，交給它們各自的onclick/onchange處理，
+  // 這裡不要重複觸發，不然點「放置包裹」會變成同時觸發放置又切換選取
+  if (event.target.closest('input, button, a')) return;
+  const checkbox = document.querySelector(`.pkg-select-checkbox[data-id="${id}"]`);
+  if (!checkbox) return;
+  checkbox.checked = !checkbox.checked;
+  togglePackageSelect(id, checkbox.checked);
+}
+
+function togglePackageSelect(id, checked) {
+  if (checked) {
+    selectedPackageIds.add(id);
+  } else {
+    selectedPackageIds.delete(id);
+  }
+  updateDeleteButtonState();
+}
+
+function toggleSelectAll(checkbox) {
+  document.querySelectorAll('.pkg-select-checkbox').forEach(cb => {
+    cb.checked = checkbox.checked;
+    if (checkbox.checked) {
+      selectedPackageIds.add(cb.dataset.id);
+    } else {
+      selectedPackageIds.delete(cb.dataset.id);
+    }
+  });
+  updateDeleteButtonState();
+}
+
+function updateDeleteButtonState() {
+  const btn = document.getElementById('deleteSelectedBtn');
+  const count = selectedPackageIds.size;
+  btn.textContent = `刪除已選（${count}）`;
+  btn.disabled = count === 0;
+}
+
+async function deleteSelectedPackages() {
+  const ids = Array.from(selectedPackageIds);
+  if (ids.length === 0) return;
+  if (!confirm(`確定要刪除選取的 ${ids.length} 筆包裹紀錄嗎？此動作會直接從資料庫移除，無法復原。`)) return;
+
+  const btn = document.getElementById('deleteSelectedBtn');
+  btn.disabled = true;
+  const originalText = btn.textContent;
+  btn.textContent = '刪除中...';
+  try {
+    const resp = await fetch('/admin/packages/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ package_ids: ids }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || '刪除失敗');
+
+    if (data.skipped && data.skipped.length > 0) {
+      const reasons = data.skipped.map(s => `${s.id.slice(0, 8)}...：${s.reason}`).join('\\n');
+      alert(`已刪除 ${data.deleted.length} 筆，${data.skipped.length} 筆無法刪除：\n${reasons}`);
+    } else {
+      alert(`已刪除 ${data.deleted.length} 筆包裹紀錄`);
+    }
+    selectedPackageIds.clear();
+    exitSelectMode();
+    loadPackages();
+  } catch (e) {
+    alert('刪除失敗：' + e.message);
+  } finally {
+    updateDeleteButtonState();
+  }
 }
 
 function setPackagePagerLinkState(el, disabled) {
@@ -2985,7 +3302,7 @@ async function manualCloseDoors(btn) {
 }
 
 async function robotRecall(btn) {
-  if (!confirm('叫回機器人會強制中斷機器人正在執行的任何動作。')) return;
+  if (!confirm('叫回機器人會強制中斷機器人正在執行的任何動作，進行中的包裹任務將重置為待派送。')) return;
   btn.disabled = true;
   const originalText = btn.textContent;
   btn.textContent = '叫回中...';
@@ -2993,7 +3310,11 @@ async function robotRecall(btn) {
     const resp = await fetch('/admin/robot/recall', { method: 'POST' });
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.detail || '叫回失敗');
+    if (data.reset_count > 0) {
+      alert(`機器人已叫回，${data.reset_count} 筆進行中的任務已重置為待派送，請於機器人回到管理室後開門確認艙門內容`);
+    }
     loadRobotStatus();
+    loadPackages();
   } catch (e) {
     alert('叫回失敗：' + e.message);
   } finally {
@@ -3338,6 +3659,21 @@ ADMIN_EXCEPTIONS_HTML = """
   .pill-resolved { background: #d4edda; color: #155724; }
   .pill-redispatched { background: #cce5ff; color: #004085; }
   .empty-hint { color: #999; font-size: 14px; padding: 12px 0; }
+  .pkg-select-checkbox, #selectAllCheckbox {
+    appearance: none; -webkit-appearance: none;
+    width: 22px; height: 22px; border: 2px solid #ccc; border-radius: 7px;
+    cursor: pointer; position: relative; vertical-align: middle; margin: 0;
+  }
+  .pkg-select-checkbox:checked, #selectAllCheckbox:checked {
+    background: #E2231A; border-color: #E2231A;
+  }
+  .pkg-select-checkbox:checked::after, #selectAllCheckbox:checked::after {
+    content: ''; position: absolute; left: 7px; top: 3px;
+    width: 5px; height: 10px; border: solid white; border-width: 0 2px 2px 0;
+    transform: rotate(45deg);
+  }
+  tr.selectable-row { cursor: pointer; }
+  tr.selectable-row:hover { background: #fff5f5; }
 </style>
 </head>
 <body>
@@ -3352,7 +3688,9 @@ ADMIN_EXCEPTIONS_HTML = """
   <p style="font-size:13px;color:#888;margin-top:0;">
     主畫面的確認/關門流程須先完成，才能在這裡按「重新派貨」。
   </p>
-  <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;">
+  <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap;">
+    <button id="selectModeBtn" class="secondary" style="margin-left:0;" onclick="toggleSelectMode()">選取</button>
+    <button id="closeSelectedBtn" style="display:none;background:#dc3545;margin-left:0;" onclick="closeSelectedCases()" disabled>全部銷案（0）</button>
     <input type="text" id="unitFilterInput" placeholder="輸入門牌搜尋"
       style="width:220px;height:36px;padding:0 10px;border-radius:6px;border:1px solid #ccc;font-size:14px;box-sizing:border-box;" />
     <button id="unitFilterBtn" onclick="filterByUnit()"
@@ -3363,7 +3701,10 @@ ADMIN_EXCEPTIONS_HTML = """
     <button class="secondary" style="margin-left:auto;height:36px;padding:0 16px;font-size:14px;box-sizing:border-box;" onclick="openManualCloseCaseModal()">手動銷案</button>
   </div>
   <table>
-    <thead><tr><th>門牌</th><th>收件人</th><th>狀態</th><th>建立時間</th><th>主畫面處理</th><th>操作</th><th>已通知時間</th></tr></thead>
+    <thead><tr>
+      <th id="selectColHeader" style="display:none;width:30px;"><input type="checkbox" id="selectAllCheckbox" onchange="toggleSelectAll(this)" /></th>
+      <th>門牌</th><th>收件人</th><th>狀態</th><th>建立時間</th><th>主畫面處理</th><th>操作</th><th>已通知時間</th>
+    </tr></thead>
     <tbody id="exceptionsTableBody"><tr><td colspan="7">載入中...</td></tr></tbody>
   </table>
 </div>
@@ -3397,6 +3738,8 @@ const STATUS_LABEL = {
 };
 
 let allExceptions = [];
+let selectMode = false;
+let selectedPackageIds = new Set();
 
 async function loadExceptions() {
   const tbody = document.getElementById('exceptionsTableBody');
@@ -3405,19 +3748,23 @@ async function loadExceptions() {
     allExceptions = await resp.json();
     renderExceptions(allExceptions);
   } catch (e) {
-    tbody.innerHTML = `<tr><td colspan="7" style="color:red">載入失敗：${e.message}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="${selectMode ? 8 : 7}" style="color:red">載入失敗：${e.message}</td></tr>`;
   }
 }
 
 function renderExceptions(packages) {
   const tbody = document.getElementById('exceptionsTableBody');
   const keyword = document.getElementById('unitFilterInput').value.trim();
+  const colCount = selectMode ? 8 : 7;
 
   if (packages.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="7" class="empty-hint">${keyword ? '找不到符合的門牌' : '目前沒有退回/作廢的包裹'}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="${colCount}" class="empty-hint">${keyword ? '找不到符合的門牌' : '目前沒有退回/作廢的包裹'}</td></tr>`;
     return;
   }
   tbody.innerHTML = packages.map(p => {
+    const checkboxCell = selectMode
+      ? `<td><input type="checkbox" class="pkg-select-checkbox" data-id="${p.id}" ${selectedPackageIds.has(p.id) ? 'checked' : ''} onchange="togglePackageSelect('${p.id}', this.checked)" /></td>`
+      : '';
     const label = STATUS_LABEL[p.status] || p.status;
     const createdAt = p.created_at ? p.created_at.replace('T', ' ').slice(0, 16) : '-';
     const recipients = p.recipients.map(r => r.name).join('、') || '-';
@@ -3447,7 +3794,11 @@ function renderExceptions(packages) {
       </span>`;
     }
 
-    return `<tr>
+    const rowClass = selectMode ? 'selectable-row' : '';
+    const rowClick = selectMode ? ` onclick="handleRowClick(event, '${p.id}')"` : '';
+
+    return `<tr class="${rowClass}"${rowClick}>
+      ${checkboxCell}
       <td>${p.unit}</td>
       <td>${recipients}</td>
       <td><span class="status-badge status-${p.status}">${label}</span></td>
@@ -3457,6 +3808,98 @@ function renderExceptions(packages) {
       <td>${notifiedCell}</td>
     </tr>`;
   }).join('');
+}
+
+function toggleSelectMode() {
+  if (selectMode) {
+    exitSelectMode();
+    renderExceptions(allExceptions);
+    return;
+  }
+  selectMode = true;
+  document.getElementById('selectColHeader').style.display = 'table-cell';
+  document.getElementById('selectModeBtn').textContent = '取消選取';
+  document.getElementById('closeSelectedBtn').style.display = 'inline-block';
+  updateCloseSelectedButtonState();
+  renderExceptions(allExceptions);
+}
+
+function exitSelectMode() {
+  selectMode = false;
+  selectedPackageIds.clear();
+  document.getElementById('selectColHeader').style.display = 'none';
+  document.getElementById('selectModeBtn').textContent = '選取';
+  document.getElementById('closeSelectedBtn').style.display = 'none';
+  updateCloseSelectedButtonState();
+}
+
+function handleRowClick(event, id) {
+  if (event.target.closest('input, button, a')) return;
+  const checkbox = document.querySelector(`.pkg-select-checkbox[data-id="${id}"]`);
+  if (!checkbox) return;
+  checkbox.checked = !checkbox.checked;
+  togglePackageSelect(id, checkbox.checked);
+}
+
+function togglePackageSelect(id, checked) {
+  if (checked) {
+    selectedPackageIds.add(id);
+  } else {
+    selectedPackageIds.delete(id);
+  }
+  updateCloseSelectedButtonState();
+}
+
+function toggleSelectAll(checkbox) {
+  document.querySelectorAll('.pkg-select-checkbox').forEach(cb => {
+    cb.checked = checkbox.checked;
+    if (checkbox.checked) {
+      selectedPackageIds.add(cb.dataset.id);
+    } else {
+      selectedPackageIds.delete(cb.dataset.id);
+    }
+  });
+  updateCloseSelectedButtonState();
+}
+
+function updateCloseSelectedButtonState() {
+  const btn = document.getElementById('closeSelectedBtn');
+  const count = selectedPackageIds.size;
+  btn.textContent = `全部銷案（${count}）`;
+  btn.disabled = count === 0;
+}
+
+async function closeSelectedCases() {
+  const ids = Array.from(selectedPackageIds);
+  if (ids.length === 0) return;
+  if (!confirm(`確定要將選取的 ${ids.length} 筆包裹全部銷案嗎？銷案後這些紀錄會從此頁面移除，主畫面資料不受影響，且無法復原。`)) return;
+
+  const btn = document.getElementById('closeSelectedBtn');
+  btn.disabled = true;
+  const originalText = btn.textContent;
+  btn.textContent = '銷案中...';
+  try {
+    const resp = await fetch('/admin/packages/close-case-batch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ package_ids: ids }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || '銷案失敗');
+
+    if (data.skipped && data.skipped.length > 0) {
+      const reasons = data.skipped.map(s => `${s.id.slice(0, 8)}...：${s.reason}`).join('\\n');
+      alert(`已銷案 ${data.closed.length} 筆，${data.skipped.length} 筆無法銷案：\n${reasons}`);
+    } else {
+      alert(`已銷案 ${data.closed.length} 筆`);
+    }
+    exitSelectMode();
+    loadExceptions();
+  } catch (e) {
+    alert('銷案失敗：' + e.message);
+  } finally {
+    updateCloseSelectedButtonState();
+  }
 }
 
 function filterByUnit() {
