@@ -221,7 +221,7 @@ class FlashbotController:
             # 暫停 poll_interval 秒後再問一次 (避免塞爆 Pudu 伺服器)
             time.sleep(poll_interval)
             
-        print("[系統] ⚠️ 輪詢超時，機器人可能卡在路上了！")
+        print("[系統] 輪詢超時，機器人可能卡在路上了！")
         return False
     
     def custom_complete(self, payload: dict) -> dict:

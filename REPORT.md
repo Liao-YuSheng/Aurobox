@@ -13,7 +13,6 @@
 - 根目錄文件與設定：README.md、REPORT.md、pyproject.toml、run.py、.env.example、.gitignore
 - 核心程式：src/aurobox 全部 Python 檔
 - 測試與腳本：tests、scripts
-- 參考資料：docs、reference 目錄內 Markdown 與 Notebook 摘要
 
 ## 2. 系統現況摘要
 

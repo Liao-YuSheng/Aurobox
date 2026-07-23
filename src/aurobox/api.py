@@ -1,7 +1,7 @@
 """API routes for Robot Hardware & Door management."""
 
-import threading
 import time
+import threading
 from flask import Blueprint, request, jsonify, current_app
 from . import db
 from .models import Door, DoorStatus, RobotState
@@ -75,37 +75,84 @@ def robot_recharge():
         return jsonify({'error': str(e)}), 500
 
 # ==========================================================
-# 1. 分派空艙門並為管理員開門 (Assign & Open)
+# 1. 分派空艙門並為管理員開門 (Assign & Open) - 支援指定門與自動分配雙模式
 # ==========================================================
 @api_bp.route('/packages/<package_id>/assign', methods=['POST'])
 def assign_door_for_package(package_id):
     data = request.get_json(silent=True) or {}
+
+    # 取得前端傳遞的參數 (若有傳入 door_numbers 則走指定模式，否則退回 quantity 模式)
+    requested_doors = data.get('door_numbers')
+    if isinstance(requested_doors, str):
+        requested_doors = [requested_doors]
+
     door_count = int(data.get('quantity', 1))
 
     controller = current_app.pudu_controller
     home_point = current_app.home_point
     sn = current_app.config.get('ROBOT_SN')
-    
-    full_doors = Door.query.filter_by(sn=sn, status=DoorStatus.FULL).order_by(Door.door_number).first()
-    if full_doors:
-        return jsonify({'error': 'Robot is currently out for delivery or fully loaded. Please wait until it returns.', 'status': 'conflict'}), 409
-    
-    existing_doors = Door.query.filter_by(sn=sn, package_id=package_id).order_by(Door.door_number).all()
-    if len(existing_doors) >= door_count:
-        return jsonify({'status': 'success', 'door_numbers': [d.door_number for d in existing_doors]}), 200
-    
-    needed_count = door_count - len(existing_doors)
     active_doors = _get_active_doors(current_app)
     
-    empty_doors = Door.query.filter(
-        Door.sn == sn, 
-        Door.status == DoorStatus.EMPTY,
-        Door.door_number.in_(active_doors)
-    ).order_by(Door.door_number).with_for_update(skip_locked=True).limit(needed_count).all()
+    # [防呆] 檢查機器人是否已經在外送貨或滿載，避免中斷現有任務
+    # full_doors = Door.query.filter_by(sn=sn, status=DoorStatus.FULL).order_by(Door.door_number).first()
+    # if full_doors:
+    #     return jsonify({'error': 'Robot is currently out for delivery or fully loaded. Please wait until it returns.', 'status': 'conflict'}), 409
     
-    if len(empty_doors) < needed_count:
-        return jsonify({'error': f'Not enough empty doors. Requested: {needed_count}, Available: {len(empty_doors)}'}), 400
-    
+    # 檢查該包裹是否已經有被指派的艙門
+    existing_doors = Door.query.filter_by(sn=sn, package_id=package_id).order_by(Door.door_number).all()
+    existing_numbers = [d.door_number for d in existing_doors]
+
+    doors_to_assign = []
+
+    # ================= 策略 A: 外部明確指定艙門 =================
+    if requested_doors is not None:
+        if not isinstance(requested_doors, list) or not requested_doors:
+            return jsonify({'error': 'door_numbers must be a non-empty list.', 'status': 'bad_request'}), 400
+            
+        invalid_doors = [d for d in requested_doors if d not in active_doors]
+        if invalid_doors:
+            return jsonify({'error': f'Invalid door numbers for current mode: {invalid_doors}'}), 400
+
+        # Idempotent 檢查: 如果傳入的艙門與已指派的完全吻合，直接回傳成功
+        if set(existing_numbers) == set(requested_doors):
+            return jsonify({'status': 'success', 'door_numbers': existing_numbers}), 200
+        elif existing_numbers:
+            return jsonify({'error': f'Package {package_id} is already assigned to {existing_numbers}'}), 409
+
+        # 鎖定指定的艙門並檢查狀態
+        target_doors = Door.query.filter(
+            Door.sn == sn, 
+            Door.door_number.in_(requested_doors)
+        ).with_for_update().all()
+        
+        busy_doors = [d.door_number for d in target_doors if d.status != DoorStatus.EMPTY]
+        if busy_doors:
+            return jsonify({'error': f'Cannot assign. Doors {busy_doors} are not empty.', 'status': 'conflict'}), 409
+        if len(target_doors) != len(requested_doors):
+            return jsonify({'error': 'Some requested doors were not found.'}), 400
+            
+        doors_to_assign = target_doors
+
+    # ================= 策略 B: 系統自動尋找空門 (原版 Quantity 邏輯) =================
+    else:
+        # 如果已經指派的艙門數量夠了，直接回傳
+        if len(existing_doors) >= door_count:
+            return jsonify({'status': 'success', 'door_numbers': existing_numbers}), 200
+        
+        needed_count = door_count - len(existing_doors)
+        
+        empty_doors = Door.query.filter(
+            Door.sn == sn, 
+            Door.status == DoorStatus.EMPTY,
+            Door.door_number.in_(active_doors)
+        ).order_by(Door.door_number).with_for_update(skip_locked=True).limit(needed_count).all()
+        
+        if len(empty_doors) < needed_count:
+            return jsonify({'error': f'Not enough empty doors. Requested: {needed_count}, Available: {len(empty_doors)}'}), 400
+            
+        doors_to_assign = empty_doors
+
+    # ================= 共用邏輯: 呼叫機器人回管理室並更新資料庫 =================
     try:
         already_assigning = Door.query.filter_by(sn=sn, status=DoorStatus.ASSIGNED).first()
         
@@ -119,10 +166,11 @@ def assign_door_for_package(package_id):
             update_robot_state(sn, point=home_point, task_id=task_id)
 
         assigned_door_numbers = []
-        for door in empty_doors:
+        for door in doors_to_assign:
             door.package_id = package_id
             door.status = DoorStatus.ASSIGNED
             assigned_door_numbers.append(door.door_number)
+        
         db.session.commit()
 
         app = current_app._get_current_object()
@@ -132,9 +180,10 @@ def assign_door_for_package(package_id):
         return jsonify({
             'status': 'success', 
             'message': f'Assigned doors {assigned_door_numbers} for {package_id}',
-            'door_numbers': [d.door_number for d in existing_doors] + assigned_door_numbers
+            'door_numbers': existing_numbers + assigned_door_numbers
         })
     except Exception as e:
+        db.session.rollback()
         return jsonify({'error': str(e)}), 500
 
 # ==========================================================
@@ -286,11 +335,11 @@ def package_complete(package_id):
             try:
                 controller.custom_complete({"task_id": task_id_to_clear})
                 update_robot_state(sn, clear_task=True)
+                time.sleep(6)
             except Exception: pass
         
         control_states = [{"operation": False, "door_number": d.door_number} for d in doors]
         controller.control_doors(sn=sn, control_states=control_states)
-        time.sleep(6)
         
         for d in doors:
             d.status = DoorStatus.EMPTY
@@ -415,7 +464,7 @@ def complete_returned_doors():
 
         print(f"[系統] 所有艙門已清空並關閉，硬體資源完全釋放", flush=True)
 
-        return jsonify({'status': 'success', 'message': 'All doors inspected, closed and freed in a single batch.', 'closed_doors': closed_doors})
+        return jsonify({'status': 'success', 'message': f'All doors: {closed_doors} inspected, closed and freed in a single batch.'})
     except Exception as e:
         import traceback
         current_app.logger.error(traceback.format_exc())
@@ -506,13 +555,48 @@ def robot_recall():
     sn = current_app.config.get('ROBOT_SN')
     home_point = current_app.home_point
 
-    # 1. 取得唯一任務 ID
-    robot_state = RobotState.query.filter_by(sn=sn).first()
-    active_task_id = robot_state.current_task_id if robot_state else None
-    
     # 鎖定所有艙門，準備資料庫保護
     active_doors = Door.query.filter(Door.sn == sn).with_for_update().all()
 
+    # === 狀態防護牆 (保護最後一哩路的送貨流程) ===
+    live_status = controller.get_status_summary(sn)
+    move_state = live_status.get('move_state')
+    
+    # 鎖定所有艙門，準備資料庫保護與檢查
+    active_doors = Door.query.filter(Door.sn == sn).with_for_update().all()
+    
+    # 檢查是否有門正在 PICKING (已掃碼，門已開，等待 Complete 關門)
+    is_picking = any(door.status == DoorStatus.PICKING for door in active_doors)
+    
+    # 取得唯一任務 ID 與當前點位
+    robot_state = RobotState.query.filter_by(sn=sn).first()
+    active_task_id = robot_state.current_task_id if robot_state else None
+    is_at_door = (robot_state and robot_state.last_point != home_point)
+
+    is_protected = is_picking or (is_at_door and move_state in ['APPROACHING', 'ARRIVE']) or (is_at_door and move_state == 'IDLE' and active_task_id)
+    # 拒絕召回的條件：
+    # 1. 正在接近或剛抵達 (APPROACHING / ARRIVE)
+    # 2. 門已經被打開，住戶正在取件 (PICKING 狀態)
+    # 3. 已抵達但任務未結束 (IDLE + 有 task_id，代表還在螢幕顯示 QR Code 等待掃描)
+    if is_protected:
+        print(f"[系統] 召回進入排隊：機器人正在服務住戶中，等待流程結束...", flush=True)
+        
+        # 匯入並啟動背景排隊執行緒
+        from .tasks import _wait_and_execute_recall
+        app = current_app._get_current_object()
+        threading.Thread(
+            target=_wait_and_execute_recall,
+            args=(app, controller, sn, home_point),
+            daemon=True
+        ).start()
+
+        return jsonify({
+            'status': 'success',
+            'message': 'Robot is serving a resident. Recall is queued and will execute automatically after delivery completes.',
+            'queued': True,
+            'returning_home': False
+        }), 200
+    
     if not active_task_id:
         return jsonify({
             'status': 'error',
@@ -522,17 +606,19 @@ def robot_recall():
         }), 400
 
     try:
-        # 2. 發送 Cancel 取消任務
+        # 發送 Cancel 取消任務
         try:
             controller.custom_call_cancel({"task_id": active_task_id})
             print(f"[系統] 成功發送 Cancel 註銷任務 {active_task_id}，等待硬體重置...", flush=True)
         except Exception as e:
             print(f"[系統] 註銷任務 {active_task_id} 發生異常: {e}", flush=True)
-        
-        # 3. 🛡️ 物理緩衝：等待硬體完全註銷舊路線，回到 IDLE
-        time.sleep(5)
+            return jsonify({'status': 'success', 'message': f'Robot is already returning.'}), 200
 
-        # 4. 發送常規導航指令回管理室
+        update_robot_state(sn, clear_task=True)
+        # 物理緩衝：等待硬體完全註銷舊路線，回到 IDLE
+        time.sleep(6)
+
+        # 發送常規導航指令回管理室
         print(f"[系統] 硬體重置完畢，發送新導航指令回管理室 {home_point}...", flush=True)
         payload = build_custom_call_payload(sn=sn, point=home_point)
         res = controller.custom_call2(payload=payload)
@@ -541,7 +627,7 @@ def robot_recall():
         new_task = res.get('data', {}).get('task_id') if res and res.get('message') == 'SUCCESS' else None
         update_robot_state(sn, point=home_point, task_id=new_task)
 
-        # 5. 處理本機資料庫的艙門保護
+        # 處理本機資料庫的艙門保護
         recalled_doors = []
         for door in active_doors:
             # 遭遇 Recall，只要是處理到一半的狀態，通通強制轉為 FULL 保護起來

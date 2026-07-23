@@ -1,15 +1,19 @@
 """Background threading tasks."""
 import time
 from flask import current_app
+from . import db
 import requests as http_requests
 import threading
 import queue
-from .models import Door, RobotState
+from .models import Door, DoorStatus, RobotState
+from .services import update_robot_state
+from .utils import build_custom_call_payload
 
 timeout_seconds = 300
 # 宣告全域 Lock，防止多個分派任務同時執行開門動作
 _assign_lock = threading.Lock()
 _assign_queue = queue.Queue()
+_recall_lock = threading.Lock()
 
 def _return_for_assign(
     app,
@@ -77,7 +81,7 @@ def _poll_notify_display_qr(
 ) -> None:
     """背景執行緒：輪詢機器人狀態直到抵達，再通知中央大腦。"""
     with app.app_context():
-        time.sleep(3)
+        time.sleep(10)
         
         arrived = controller.wait_until_arrived(
             sn=sn,
@@ -88,6 +92,16 @@ def _poll_notify_display_qr(
             print(f"[系統] 包裹 {package_id} 輪詢超時，未收到抵達確認", flush=True)
             return
         
+        # === 關鍵修復：任務一致性檢查 (防禦 Recall / 二次 Dispatch) ===
+        robot_state = RobotState.query.filter_by(sn=sn).first()
+        if robot_state:
+            current_db_task_id = robot_state.current_task_id
+            
+            # 資料庫裡面的任務 ID 已經跟當初傳進來的不一樣
+            if task_id and current_db_task_id != task_id:
+                print(f"[系統] 偵測到任務已變更 (可能遭遇 Recall)。包裹 {package_id} 原任務 {task_id} 已失效，取消抵達推播！", flush=True)
+                return
+            
         callback_base_url = current_app.config.get('CENTRAL_API_BASE_URL', '')
         if not callback_base_url:
             print("[系統] 未設定 CENTRAL_API_BASE_URL，無法啟動主動推播功能", flush=True)
@@ -129,6 +143,75 @@ def _poll_notify_display_qr(
         if not callback_base_url:
             print("[系統] CENTRAL_API_BASE_URL 未設定，略過抵達通知", flush=True)
             return
+
+def _wait_and_execute_recall(app, controller, sn, home_point):
+    """背景執行緒：等待防護牆解除後，自動執行召回任務"""
+    
+    if not _recall_lock.acquire(blocking=False):
+        print("[系統] 已經有排隊中的召回任務，略過重複啟動。", flush=True)
+        return
+        
+    try:
+        with app.app_context():
+            print("[系統] 進入召回排隊等待：等待住戶取件流程結束...", flush=True)
+            
+            while True:
+                # 重新整理 DB Session 確保讀到最新狀態
+                db.session.remove()
+                
+                live_status = controller.get_status_summary(sn)
+                move_state = live_status.get('move_state')
+                
+                active_doors = Door.query.filter_by(sn=sn).all()
+                is_picking = any(door.status == DoorStatus.PICKING for door in active_doors)
+                
+                robot_state = RobotState.query.filter_by(sn=sn).first()
+                active_task_id = robot_state.current_task_id if robot_state else None
+                is_at_door = (robot_state and robot_state.last_point != home_point)
+                
+                # 防護牆條件判定
+                is_protected = is_picking or (is_at_door and move_state in ['APPROACHING', 'ARRIVE']) or (is_at_door and move_state == 'IDLE' and active_task_id)
+                
+                if not is_protected:
+                    print("[系統] 防護牆已解除！", flush=True)
+                    # === 智慧判斷：如果住戶取完件後，系統已經自動判定全空並返航了，就不需要重複召回 ===
+                    if robot_state and robot_state.last_point == home_point:
+                        print("[系統] 機器人已經在自動返航的路上，排隊召回任務圓滿結束。", flush=True)
+                        return
+                    break # 跳出迴圈，準備執行強制召回
+                
+                # 每 3 秒檢查一次狀態
+                time.sleep(3)
+
+            # 防護牆解除，且未自動返航，開始強制召回
+            print("[系統] 開始執行排隊中的強制召回任務！", flush=True)
+            
+            # 此時若還有殘留任務 (例如還有其他包裹沒送)，將其註銷
+            if active_task_id:
+                try:
+                    controller.custom_call_cancel({"task_id": active_task_id})
+                except Exception:
+                    pass
+                update_robot_state(sn, clear_task=True)
+                time.sleep(6) # 等待硬體重置
+
+            print(f"[系統] 發送新導航指令回管理室 {home_point}...", flush=True)
+            payload = build_custom_call_payload(sn=sn, point=home_point)
+            res = controller.custom_call2(payload=payload)
+            
+            new_task = res.get('data', {}).get('task_id') if res and res.get('message') == 'SUCCESS' else None
+            update_robot_state(sn, point=home_point, task_id=new_task)
+
+            # 處理本機資料庫的艙門保護 (將未送達的包裹鎖定為 FULL)
+            active_doors = Door.query.filter_by(sn=sn).with_for_update().all()
+            for door in active_doors:
+                if door.status in [DoorStatus.PICKING, DoorStatus.ASSIGNED]:
+                    door.status = DoorStatus.FULL
+            db.session.commit()
+            print("[系統] 排隊召回任務執行完畢！", flush=True)
+            
+    finally:
+        _recall_lock.release()
 
 '''
 def _push_dashboard_status_loop(app, poll_interval: int = 3):
