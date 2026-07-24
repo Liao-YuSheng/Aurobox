@@ -2,11 +2,11 @@
 
 import os
 from flask import Flask, jsonify
-from .models import db, Door, DoorStatus
+from .models import db, Door, DoorStatus, RobotState
 from .services import FlashbotController
 from .config import load_config
 from .api import api_bp
-# from .tasks import _push_dashboard_status_loop
+from .tasks import _hardware_watchdog
 import threading
 
 def ensure_default_doors(app: Flask) -> None:
@@ -48,6 +48,13 @@ def ensure_default_doors(app: Flask) -> None:
         door.status = DoorStatus.EMPTY.value
         door.package_id = None
 
+    robot_state = RobotState.query.filter_by(sn=sn).first()
+    if robot_state:
+        robot_state.current_task_id = None
+
+    if db.session.new or db.session.dirty:
+        db.session.commit()
+
     if db.session.new or db.session.dirty:
         db.session.commit()
 
@@ -59,7 +66,7 @@ def ensure_default_doors(app: Flask) -> None:
             for door_number in active_door_numbers
         ]
         
-        print(f"[系統] 啟動初始化：準備關閉所有實體艙門 {active_door_numbers}...", flush=True)
+        # print(f"[系統] 啟動初始化：準備關閉所有實體艙門 {active_door_numbers}...", flush=True)
         controller.control_doors(sn=sn, control_states=control_states)
         print("[系統] 初始化關門指令發送成功，軟硬體狀態已同步為 EMPTY！", flush=True)
         
@@ -111,6 +118,18 @@ def create_app(config=None, reset_db=True):
     
     # 註冊 API 藍圖 (不再註冊 webhooks)
     app.register_blueprint(api_bp, url_prefix='/api')
+
+    controller = app.pudu_controller
+    sn = app.config.get('ROBOT_SN')
+    
+    if controller and sn:
+        watchdog_thread = threading.Thread(
+            target=_hardware_watchdog,
+            args=(app, controller, sn), # 傳入 tasks.py 定義的三個參數
+            daemon=True # 設定 daemon=True，這樣 Flask 關閉時執行緒也會跟著乾淨關閉
+        )
+        watchdog_thread.start()
+        print("[系統] Watchdog 執行緒已隨 App 啟動，負責監控硬體 STUCK 等異常", flush=True)
     '''
     push_thread = threading.Thread(
         target=_push_dashboard_status_loop,

@@ -54,7 +54,7 @@ def main():
         host=args.host,
         port=args.port,
         debug=args.debug,
-        use_reloader=True
+        use_reloader=False
     )
 
 if __name__ == '__main__':

@@ -74,75 +74,87 @@ def _poll_notify_display_qr(
     app,
     controller,
     sn: str,
-    package_id: str,
+    door_task_id: str,
     task_id: str = None,
-    timeout_seconds: int = timeout_seconds,
+    timeout_seconds: int = 300, # 建議給個預設值，避免全域變數讀不到
     poll_interval: int = 5,
 ) -> None:
     """背景執行緒：輪詢機器人狀態直到抵達，再通知中央大腦。"""
+    
+    # 1. 第一層：先進入 Flask 應用程式的 Context
     with app.app_context():
-        time.sleep(10)
-        
-        arrived = controller.wait_until_arrived(
-            sn=sn,
-            timeout_seconds=timeout_seconds,
-            poll_interval=poll_interval,
-        )
-        if not arrived:
-            print(f"[系統] 包裹 {package_id} 輪詢超時，未收到抵達確認", flush=True)
-            return
-        
-        # === 關鍵修復：任務一致性檢查 (防禦 Recall / 二次 Dispatch) ===
-        robot_state = RobotState.query.filter_by(sn=sn).first()
-        if robot_state:
-            current_db_task_id = robot_state.current_task_id
+        # 2. 第二層：把所有邏輯用 try 包起來，確保最後一定會走到 finally
+        try:
+            time.sleep(10)
+            print("start polling", flush=True)
             
-            # 資料庫裡面的任務 ID 已經跟當初傳進來的不一樣
-            if task_id and current_db_task_id != task_id:
-                print(f"[系統] 偵測到任務已變更 (可能遭遇 Recall)。包裹 {package_id} 原任務 {task_id} 已失效，取消抵達推播！", flush=True)
+            arrived = controller.wait_until_arrived(
+                sn=sn,
+                timeout_seconds=timeout_seconds,
+                poll_interval=poll_interval,
+            )
+            
+            if not arrived:
+                print(f"[系統] 任務 {door_task_id} 輪詢超時，未收到抵達確認", flush=True)
+                return # 這裡 return 後，會自動跳去執行 finally，安全釋放連線！
+            
+            # === 關鍵修復：任務一致性檢查 (防禦 Recall / 二次 Dispatch) ===
+            robot_state = RobotState.query.filter_by(sn=sn).first()
+            if robot_state:
+                current_db_task_id = robot_state.current_task_id
+                
+                # 資料庫裡面的任務 ID 已經跟當初傳進來的不一樣
+                if task_id and current_db_task_id != task_id:
+                    print(f"[系統] 偵測到任務已變更 (可能遭遇 Recall)。任務 {door_task_id} 原任務 {task_id} 已失效，取消抵達推播！", flush=True)
+                    return
+            
+            # 安全優化：在背景執行緒中，直接用傳入的 app 讀取 config 最安全
+            callback_base_url = app.config.get('CENTRAL_API_BASE_URL', '')
+            if not callback_base_url:
+                print("[系統] 未設定 CENTRAL_API_BASE_URL，無法啟動主動推播功能", flush=True)
                 return
             
-        callback_base_url = current_app.config.get('CENTRAL_API_BASE_URL', '')
-        if not callback_base_url:
-            print("[系統] 未設定 CENTRAL_API_BASE_URL，無法啟動主動推播功能", flush=True)
-            return
-        base = callback_base_url.rstrip('/')
-
-        url = f"{base}/packages/{package_id}/arrived"
-        try:
-            resp = http_requests.post(url, timeout=10)
-            if resp.ok:
-                print(f"[系統] 抵達通知成功 ({resp.status_code})  →  {url}", flush=True)
-            else:
-                print(f"[系統] 抵達通知回應異常 ({resp.status_code})  →  {url}\n回應內容: {resp.text[:300]}", flush=True)
-        except Exception as e:
-            print(f"[系統] 抵達通知失敗: {e}  →  {url}", flush=True)
-
-        if task_id:
-            print(f"[系統] 抵達定點，準備顯示 QR Code (Task ID: {task_id})", flush=True)
-            payload_qr = {
-                "sn": sn,
-                "payload": {
-                    "call_mode": "QR_CODE",
-                    "task_id": task_id,
-                    "mode_data": {
-                        "qrcode": package_id,
-                        "text": "請掃描 QR Code 取件"
+            base = callback_base_url.rstrip('/')
+            url = f"{base}/door-tasks/{door_task_id}/arrived"
+            
+            try:
+                import requests as http_requests # 確保有引入
+                resp = http_requests.post(url, timeout=10)
+                if resp.ok:
+                    print(f"[系統] 抵達通知成功 ({resp.status_code})  →  {url}", flush=True)
+                else:
+                    print(f"[系統] 抵達通知回應異常 ({resp.status_code})  →  {url}\n回應內容: {resp.text[:300]}", flush=True)
+            except http_requests.exceptions.Timeout:
+                print(f"[系統] 抵達通知超時: 中央大腦伺服器無回應  →  {url}", flush=True)
+            except Exception as e:
+                print(f"[系統] 抵達通知失敗: {e}  →  {url}", flush=True)
+            
+            if task_id:
+                print(f"[系統] 抵達定點，準備顯示 QR Code (Task ID: {task_id})", flush=True)
+                payload_qr = {
+                    "sn": sn,
+                    "payload": {
+                        "call_mode": "QR_CODE",
+                        "task_id": task_id,
+                        "mode_data": {
+                            "qrcode": door_task_id,
+                            "text": "請掃描 QR Code 取件"
+                        }
                     }
                 }
-            }
-            try:
-                res = controller.custom_content(payload=payload_qr)
-                if res and res.get('message') == 'SUCCESS':
-                    print("[系統] QR Code 畫面切換成功", flush=True)
-                else:
-                    print(f"[系統] QR Code 顯示異常: {res}", flush=True)
-            except Exception as e:
-                print(f"[系統] QR Code 顯示失敗: {e}", flush=True)
+                try:
+                    res = controller.custom_content(payload=payload_qr)
+                    if res and res.get('message') == 'SUCCESS':
+                        print("[系統] QR Code 畫面切換成功", flush=True)
+                    else:
+                        print(f"[系統] QR Code 顯示異常: {res}", flush=True)
+                except Exception as e:
+                    print(f"[系統] QR Code 顯示失敗: {e}", flush=True)
 
-        if not callback_base_url:
-            print("[系統] CENTRAL_API_BASE_URL 未設定，略過抵達通知", flush=True)
-            return
+        # 3. 最關鍵的防護網：在離開 Context 前，歸還資料庫連線
+        finally:
+            from .models import db # 確保有拿到 db
+            db.session.remove()
 
 def _wait_and_execute_recall(app, controller, sn, home_point):
     """背景執行緒：等待防護牆解除後，自動執行召回任務"""
@@ -150,12 +162,16 @@ def _wait_and_execute_recall(app, controller, sn, home_point):
     if not _recall_lock.acquire(blocking=False):
         print("[系統] 已經有排隊中的召回任務，略過重複啟動。", flush=True)
         return
-        
-    try:
-        with app.app_context():
+    
+    with app.app_context():
+        try:
             print("[系統] 進入召回排隊等待：等待住戶取件流程結束...", flush=True)
-            
+
+            wait_start = time.time()
             while True:
+                if time.time() - wait_start > 600:  # 10 分鐘超時
+                    print("[系統] 召回排隊等待超時，強制終止任務", flush=True)
+                    break
                 # 重新整理 DB Session 確保讀到最新狀態
                 db.session.remove()
                 
@@ -163,18 +179,22 @@ def _wait_and_execute_recall(app, controller, sn, home_point):
                 move_state = live_status.get('move_state')
                 
                 active_doors = Door.query.filter_by(sn=sn).all()
-                is_picking = any(door.status == DoorStatus.PICKING for door in active_doors)
+                is_picking = any(door.status == DoorStatus.PICKING.value for door in active_doors)
                 
                 robot_state = RobotState.query.filter_by(sn=sn).first()
                 active_task_id = robot_state.current_task_id if robot_state else None
                 is_at_door = (robot_state and robot_state.last_point != home_point)
                 
                 # 防護牆條件判定
-                is_protected = is_picking or (is_at_door and move_state in ['APPROACHING', 'ARRIVE']) or (is_at_door and move_state == 'IDLE' and active_task_id)
+                is_protected = is_picking or (is_at_door and move_state in ['APPROACHING', 'ARRIVE']) or (is_at_door and move_state == 'IDLE' and active_task_id != None)
                 
                 if not is_protected:
                     print("[系統] 防護牆已解除！", flush=True)
                     # === 智慧判斷：如果住戶取完件後，系統已經自動判定全空並返航了，就不需要重複召回 ===
+                    time.sleep(3)
+                    db.session.remove()
+
+                    robot_state = RobotState.query.filter_by(sn=sn).first()
                     if robot_state and robot_state.last_point == home_point:
                         print("[系統] 機器人已經在自動返航的路上，排隊召回任務圓滿結束。", flush=True)
                         return
@@ -205,13 +225,86 @@ def _wait_and_execute_recall(app, controller, sn, home_point):
             # 處理本機資料庫的艙門保護 (將未送達的包裹鎖定為 FULL)
             active_doors = Door.query.filter_by(sn=sn).with_for_update().all()
             for door in active_doors:
-                if door.status in [DoorStatus.PICKING, DoorStatus.ASSIGNED]:
-                    door.status = DoorStatus.FULL
+                if door.status in [DoorStatus.PICKING.value, DoorStatus.ASSIGNED.value]:
+                    door.status = DoorStatus.FULL.value
             db.session.commit()
             print("[系統] 排隊召回任務執行完畢！", flush=True)
             
+        finally:
+            db.session.remove()
+            _recall_lock.release()
+
+def _hardware_watchdog(app, controller, sn):
+    """背景執行緒：專職監控硬體異常狀態 (如 STUCK 超時)"""
+    try:
+        with app.app_context():
+            # print("[系統] 硬體異常監控守門犬已啟動...", flush=True)
+            stuck_start_time = None
+            
+            while True:
+                # 迴圈內第一件事：清快取連線
+                db.session.remove() 
+                
+                try:
+                    live_status = controller.get_status_summary(sn)
+                    move_state = live_status.get('move_state')
+                    
+                    robot_state = RobotState.query.filter_by(sn=sn).first()
+                    active_task_id = robot_state.current_task_id if robot_state else None
+                    
+                    # 只有在「身上有任務」且「發生 STUCK」時才開始計時
+                    if active_task_id and move_state == 'STUCK':
+                        if stuck_start_time is None:
+                            stuck_start_time = time.time()
+                            print(f"[系統] 偵測到機器人 STUCK，開始計時...", flush=True)
+                            
+                        elif time.time() - stuck_start_time > 120:
+                            print(f"[系統] 機器人 STUCK 超過 2 分鐘，強制介入中斷任務！", flush=True)
+                            
+                            # 1. 撤銷硬體任務
+                            try:
+                                controller.custom_call_cancel({"task_id": active_task_id})
+                            except Exception as e:
+                                print(f"[系統] 撤銷任務失敗: {e}", flush=True)
+                                
+                            # 2. 清空資料庫任務狀態，讓機器人回到待機
+                            update_robot_state(sn, clear_task=True)
+                            
+                            # 3. 重置計時器
+                            stuck_start_time = None 
+                            
+                            # TODO: 可以在這裡呼叫緊急 API 通知管理員，或是寫入 Error Log
+                            callback_base_url = current_app.config.get('CENTRAL_API_BASE_URL', '')
+
+                            if callback_base_url:
+                                base = callback_base_url.rstrip('/')
+                                url = f"{base}/"
+                                try:
+                                    resp = http_requests.post(url, timeout=5)
+                                    if resp.ok:
+                                        print(f"[系統] 已成功發送 STUCK 警報至中央大腦 ({resp.status_code})", flush=True)
+                                    else:
+                                        print(f"[系統] 發送警報失敗 ({resp.status_code}): {resp.text}", flush=True)
+                                except Exception as e:
+                                    print(f"[系統] 無法連線至中央大腦發送警報: {e}", flush=True)
+                            else:
+                                print("[系統] 未設定 CENTRAL_API_BASE_URL，略過警報推播", flush=True)
+                            
+                    else:
+                        # 只要狀態不是 STUCK (脫困了)，或是身上沒任務，就清除計時器
+                        if stuck_start_time is not None:
+                            print(f"[系統] 機器人已脫困或任務已結束，STUCK 計時器重置。", flush=True)
+                            stuck_start_time = None
+                            
+                except Exception as e:
+                    print(f"[系統] Watchdog 發生異常: {e}", flush=True)
+                
+                # 讓執行緒睡 5 秒，避免佔用 CPU 資源
+                time.sleep(5) 
+                
     finally:
-        _recall_lock.release()
+        # 迴圈意外結束時的終極防護
+        db.session.remove()
 
 '''
 def _push_dashboard_status_loop(app, poll_interval: int = 3):

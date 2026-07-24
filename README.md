@@ -132,6 +132,7 @@ POST /api/robot/recall：
 
 ### 多包裹配送與艙門控制
 
+### 以下路徑皆尚未確認，勿照抄
 - POST /api/packages/{package_id}/assign：分配 1~N 個空門給指定包裹，必要時呼叫機器人回管理室，抵達後由背景執行緒開門。
 - POST /api/packages/{package_id}/assign-timeout：裝貨逾時處理，關閉仍為 assigned 的門並釋放為 empty。
 - POST /api/doors/load：管理員確認裝貨後，將所有 assigned 門批次關門並轉為 full。

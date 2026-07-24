@@ -27,7 +27,7 @@ def main():
         else:
             print(f"目前共有 {len(doors)} 個艙門：")
             for door in doors:
-                print(f" - 門號: {door.door_number} | 狀態: {door.status} | 綁定包裹: {door.package_id}")
+                print(f" - 門號: {door.door_number} | 狀態: {door.status} | 綁定任務: {door.package_id}")
         
         print("-" * 50)
 
