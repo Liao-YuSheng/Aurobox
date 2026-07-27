@@ -345,7 +345,7 @@ def _push_dashboard_status_loop(app, poll_interval: int = 3):
                 door_states = [{
                     'door_number': door.door_number,
                     'status': door.status,
-                    'package_id': door.package_id
+                    'door_task_id': door.door_task_id
                 } for door in doors]
                 
                 # 4. 提取要監控的「目標資訊」進行比對

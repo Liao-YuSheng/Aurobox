@@ -191,9 +191,10 @@ sudo systemctl enable postgresql
 sudo systemctl start postgresql
 
 # 建立使用者與資料庫
-sudo -u postgres psql -c "CREATE USER myuser WITH PASSWORD 'mypassword';"
-sudo -u postgres psql -c "CREATE DATABASE aurobox_db OWNER myuser;"
-sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE aurobox_db TO myuser;"
+sudo -u postgres psql
+CREATE USER myuser WITH PASSWORD 'mypassword';
+CREATE DATABASE aurobox_db OWNER myuser;
+GRANT ALL PRIVILEGES ON DATABASE aurobox_db TO myuser;
 ```
 
 可用以下指令驗證 PostgreSQL 狀態：
@@ -201,6 +202,12 @@ sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE aurobox_db TO myuser;
 ```bash
 sudo systemctl status postgresql --no-pager
 ```
+
+```bash
+sudo -u postgres psql
+\c aurobox_db
+```
+
 
 3. 建立 .env（可由 .env.example 複製）
 

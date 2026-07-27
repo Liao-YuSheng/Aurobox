@@ -37,7 +37,7 @@ def ensure_default_doors(app: Flask) -> None:
                 sn=sn,
                 door_number=door_number,
                 status=DoorStatus.EMPTY.value,
-                package_id=None,
+                door_task_id=None,
             )
         )
     
@@ -46,7 +46,7 @@ def ensure_default_doors(app: Flask) -> None:
     
     for door in doors:
         door.status = DoorStatus.EMPTY.value
-        door.package_id = None
+        door.door_task_id = None
 
     robot_state = RobotState.query.filter_by(sn=sn).first()
     if robot_state:

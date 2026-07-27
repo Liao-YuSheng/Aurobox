@@ -38,13 +38,12 @@ class Door(db.Model):
     sn = db.Column(db.String(50), nullable=False)
     door_number = db.Column(db.String(10), nullable=False)  # 例如: H_01
     status = db.Column(db.String(20), nullable=False, default=DoorStatus.EMPTY.value)
-    package_id = db.Column(db.String(100), nullable=True)   # 中央大腦指派的包裹 ID
-    # task_id = db.Column(db.String(100), nullable=True)   # 當前機器人的任務 ID
+    door_task_id = db.Column(db.String(100), nullable=True)   # 中央大腦指派的包裹 ID
     
     updated_at = db.Column(db.DateTime, default=_utc_now_naive, onupdate=_utc_now_naive)
 
     def __repr__(self):
-        return f"<Door {self.door_number} - {self.status} - Pkg: {self.package_id}>"
+        return f"<Door {self.door_number} - {self.status} - Pkg: {self.door_task_id}>"
 
 class RobotState(db.Model):
     """記憶機器人當前位置與狀態的資料表"""
