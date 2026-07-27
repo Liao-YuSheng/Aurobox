@@ -190,9 +190,7 @@ def assign_door_for_package(door_task_id):
 def package_assign_timeout(door_task_id):
     controller = current_app.pudu_controller
     sn = current_app.config.get('ROBOT_SN')
-    #data = request.get_json()
-    #print(data, flush=True)
-    #mission_id = data.get('door_task_id')
+    
     doors = Door.query.filter_by(package_id=door_task_id, sn=sn, status=DoorStatus.ASSIGNED).with_for_update().all()
     if not doors: return jsonify({'status': 'success', 'message': 'No ASSIGNED doors found.'}), 200
 
