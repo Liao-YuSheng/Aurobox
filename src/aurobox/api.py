@@ -417,7 +417,7 @@ def return_packages_to_home():
 # ==========================================================
 # 8. 管理室：退件返航後開門 (Open Returned Doors)
 # ========================================================== 
-@api_bp.route('/packages/return-open', methods=['POST'])
+@api_bp.route('/doors/return-open', methods=['POST'])
 def open_returned_doors():
     controller = current_app.pudu_controller
     sn = current_app.config.get('ROBOT_SN')

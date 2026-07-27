@@ -131,22 +131,34 @@ POST /api/robot/recall：
 - GET /healthz
 
 ### 多包裹配送與艙門控制
-
-### 以下路徑皆尚未確認，勿照抄
-- POST /api/packages/{package_id}/assign：分配 1~N 個空門給指定包裹，必要時呼叫機器人回管理室，抵達後由背景執行緒開門。
-- POST /api/packages/{package_id}/assign-timeout：裝貨逾時處理，關閉仍為 assigned 的門並釋放為 empty。
-- POST /api/doors/load：管理員確認裝貨後，將所有 assigned 門批次關門並轉為 full。
-- POST /api/robot/dispatch：派送到住戶點位，寫入 task_id，背景輪詢抵達後通知中央並顯示 QR。
-- POST /api/packages/{package_id}/pickup-complete：住戶掃碼通過後，清除任務畫面並開啟該包裹對應門，狀態轉為 picking。
-- POST /api/packages/{package_id}/complete：住戶取件完成後關門、釋放該包裹門；若全空則觸發返航。
-- POST /api/packages/{package_id}/cancel：取消/拒收時關門並保留為 full，包裹留在機器人上。
-- POST /api/packages/return：要求機器人將退件包裹帶回管理室。
-- POST /api/packages/return-open：回到管理室後，批次開啟啟用門供人工檢查與取件。
-- POST /api/doors/return-complete：管理員確認取出後，批次關門並清空門狀態。
-- POST /api/doors/return-timeout：退件檢查逾時時，強制批次關門避免長時間開門。
-- POST /api/robot/recharge：僅在所有門為 empty 時允許回充，避免帶貨回充。
-- POST /api/robot/recall：緊急中斷任務並返航，將 assigned/picking 狀態保護成 full。
-- GET /api/dashboard/status：回傳機器人即時狀態摘要與目前啟用門狀態。
+- POST /api/door-tasks/<door_task_id>/assign: 傳入door_id + quantity #改
+分配 1~N 個空門給指定包裹，必要時呼叫機器人回管理室，抵達後由背景執行緒開門。
+- POST /api/door-tasks/<door_task_id>/assign-timeout #改
+裝貨逾時處理，關閉仍為 assigned 的門並釋放為 empty。
+- POST /api/doors/load
+管理員確認裝貨後，將所有 assigned 門批次關門並轉為 full。
+- POST /api/robot/dispatch: 傳入door_task_id + units
+派送到住戶點位，寫入 task_id，背景輪詢抵達後通知中央並顯示 QR。
+- POST /api/door-tasks/<door_task_id>/pickup-complete #改
+住戶掃碼通過後，清除任務畫面並開啟該包裹對應門，狀態轉為 picking。
+- POST /api/door-tasks/<door_task_id>/complete #改
+住戶取件完成後關門、釋放該包裹門；若全空則觸發返航。
+- POST /api/door-tasks/<door_task_id>/cancel #改
+取消/拒收時關門並保留為 full，包裹留在機器人上。
+- POST /api/door-tasks/return #改
+要求機器人將退件包裹帶回管理室。
+- POST /api/doors/return-open #改
+回到管理室後，批次開啟啟用門供人工檢查與取件。
+- POST /api/doors/return-complete
+管理員確認取出後，批次關門並清空門狀態。
+- POST /api/doors/return-timeout
+退件檢查逾時時，強制批次關門避免長時間開門。
+- POST /api/robot/recharge
+僅在所有門為 empty 時允許回充，避免帶貨回充。
+- POST /api/robot/recall
+緊急中斷任務並返航，將 assigned/picking 狀態保護成 full。
+- GET /api/dashboard/status
+回傳機器人即時狀態摘要與目前啟用門狀態。
 
 ## 環境需求
 
