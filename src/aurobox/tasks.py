@@ -61,10 +61,15 @@ def _return_for_assign(
                 door_to_open = _assign_queue.get()
                 try:
                     controller.control_doors(sn=sn, control_states=[{"operation": True, "door_number": door_to_open}])
+                    door_record = Door.query.filter_by(sn=sn, door_number=door_to_open).first()
+                    if door_record and door_record.status == DoorStatus.ASSIGNED.value:
+                        door_record.status = DoorStatus.LOADING.value
+                        db.session.commit()
+
                     print(f"[系統] 成功開啟艙門 {door_to_open}", flush=True)
                     time.sleep(1) 
                 except Exception as e:
-                    print(f"[系統] ⚠️ 開門失敗 (艙門 {door_to_open}): {e}", flush=True)
+                    print(f"[系統] 開門失敗 (艙門 {door_to_open}): {e}", flush=True)
                     
     finally:
         # 確保即使發生異常，也一定會釋放 Lock
@@ -119,7 +124,7 @@ def _poll_notify_display_qr(
             
             try:
                 import requests as http_requests # 確保有引入
-                resp = http_requests.post(url, timeout=10)
+                resp = http_requests.post(url, timeout=20)
                 if resp.ok:
                     print(f"[系統] 抵達通知成功 ({resp.status_code})  →  {url}", flush=True)
                 else:
@@ -169,7 +174,7 @@ def _wait_and_execute_recall(app, controller, sn, home_point):
 
             wait_start = time.time()
             while True:
-                if time.time() - wait_start > 600:  # 10 分鐘超時
+                if time.time() - wait_start > 480:  # 8 分鐘超時
                     print("[系統] 召回排隊等待超時，強制終止任務", flush=True)
                     break
                 # 重新整理 DB Session 確保讀到最新狀態
@@ -179,7 +184,10 @@ def _wait_and_execute_recall(app, controller, sn, home_point):
                 move_state = live_status.get('move_state')
                 
                 active_doors = Door.query.filter_by(sn=sn).all()
-                is_picking = any(door.status == DoorStatus.PICKING.value for door in active_doors)
+                is_picking = any(
+                    door.status in [DoorStatus.PICKING.value, DoorStatus.PUTTING.value] 
+                    for door in active_doors
+                )
                 
                 robot_state = RobotState.query.filter_by(sn=sn).first()
                 active_task_id = robot_state.current_task_id if robot_state else None
@@ -234,6 +242,7 @@ def _wait_and_execute_recall(app, controller, sn, home_point):
             db.session.remove()
             _recall_lock.release()
 
+'''
 def _hardware_watchdog(app, controller, sn):
     """背景執行緒：專職監控硬體異常狀態 (如 STUCK 超時)"""
     try:
@@ -305,7 +314,8 @@ def _hardware_watchdog(app, controller, sn):
     finally:
         # 迴圈意外結束時的終極防護
         db.session.remove()
-
+'''
+        
 '''
 def _push_dashboard_status_loop(app, poll_interval: int = 3):
     """背景執行緒：輪詢監控目標狀態，當發生變化時立刻推播給中央大腦。"""

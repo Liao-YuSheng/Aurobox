@@ -240,11 +240,19 @@ class FlashbotController:
             op = state.get("operation")
             
             # 攔截並轉換
-            if self.door_mode == "3_DOORS" and logic_door == "H_01":
-                physical_states.append({"door_number": "H_01", "operation": op})
-                physical_states.append({"door_number": "H_02", "operation": op})
+            if self.door_mode == "3_DOORS":
+                if logic_door == "H_01":
+                    # 邏輯 1 號門 -> 打開/關閉實體的 1 號與 2 號門
+                    physical_states.append({"door_number": "H_01", "operation": op})
+                    physical_states.append({"door_number": "H_02", "operation": op})
+                elif logic_door == "H_02":
+                    # 邏輯 2 號門 -> 操作實體的 3 號門
+                    physical_states.append({"door_number": "H_03", "operation": op})
+                elif logic_door == "H_03":
+                    # 邏輯 3 號門 -> 操作實體的 4 號門
+                    physical_states.append({"door_number": "H_04", "operation": op})
             else:
+                # 4 門模式直接直通
                 physical_states.append(state)
                 
-        # print(f"模式: {self.door_mode} | 轉換: {control_states} -> {physical_states}", flush=True)
         return self.client.control_doors(sn or self.default_sn, physical_states)

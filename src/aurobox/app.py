@@ -6,7 +6,7 @@ from .models import db, Door, DoorStatus, RobotState
 from .services import FlashbotController
 from .config import load_config
 from .api import api_bp
-from .tasks import _hardware_watchdog
+# from .tasks import _hardware_watchdog
 import threading
 
 def ensure_default_doors(app: Flask) -> None:
@@ -18,7 +18,7 @@ def ensure_default_doors(app: Flask) -> None:
     # 讀取設定檔中的 DOOR_MODE
     mode = app.config.get('DOOR_MODE', '4_DOORS')
     if mode == '3_DOORS':
-        active_door_numbers = ("H_01", "H_03", "H_04")
+        active_door_numbers = ("H_01", "H_02", "H_03")
     else:
         active_door_numbers = ("H_01", "H_02", "H_03", "H_04")
 
@@ -52,11 +52,7 @@ def ensure_default_doors(app: Flask) -> None:
     if robot_state:
         robot_state.current_task_id = None
 
-    if db.session.new or db.session.dirty:
-        db.session.commit()
-
-    if db.session.new or db.session.dirty:
-        db.session.commit()
+    db.session.commit()
 
     # 新增：系統啟動時，自動對實體硬體下達「關閉所有艙門」指令
     try:
@@ -121,7 +117,7 @@ def create_app(config=None, reset_db=True):
 
     controller = app.pudu_controller
     sn = app.config.get('ROBOT_SN')
-    
+    '''
     if controller and sn:
         watchdog_thread = threading.Thread(
             target=_hardware_watchdog,
@@ -130,6 +126,7 @@ def create_app(config=None, reset_db=True):
         )
         watchdog_thread.start()
         print("[系統] Watchdog 執行緒已隨 App 啟動，負責監控硬體 STUCK 等異常", flush=True)
+    '''
     '''
     push_thread = threading.Thread(
         target=_push_dashboard_status_loop,

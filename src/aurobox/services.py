@@ -36,7 +36,7 @@ def check_and_return_home_if_empty():
     # 尋找還有貨(不等於 EMPTY)的門
     non_empty_doors = Door.query.filter(
         Door.sn == sn, 
-        Door.status != DoorStatus.EMPTY
+        Door.status != DoorStatus.EMPTY.value
     ).count()
     
     if non_empty_doors == 0:

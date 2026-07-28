@@ -16,8 +16,10 @@ class DoorStatus(str, Enum):
     """Door status enum."""
     EMPTY = "empty"        # 空置
     ASSIGNED = "assigned"  # 已分配 (尚未放貨)
+    LOADING = "loading"    # 管理員裝載中 (門已開)
     FULL = "full"          # 已裝載包裹
     PICKING = "picking"    # 取件中 (門已開，住戶正在拿)
+    PUTTING = "putting"    # 放件中 (門已開，住戶正在放)
 
 class Door(db.Model):
     """Door management record."""
@@ -29,7 +31,7 @@ class Door(db.Model):
             name="ck_doors_allowed_numbers",
         ),
         db.CheckConstraint(
-            "status IN ('empty', 'assigned', 'full', 'picking')",
+            "status IN ('empty', 'assigned', 'loading', 'full', 'picking', 'putting')",
             name="ck_doors_allowed_status",
         ),
     )

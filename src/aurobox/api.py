@@ -15,7 +15,7 @@ api_bp = Blueprint('api', __name__)
 def _get_active_doors(app):
     mode = app.config.get('DOOR_MODE', '4_DOORS')
     if mode == '3_DOORS':
-        return ("H_01", "H_03", "H_04")
+        return ("H_01", "H_02", "H_03")
     return ("H_01", "H_02", "H_03", "H_04")
 
 # ==========================================================
@@ -84,6 +84,7 @@ def assign_door_for_package(door_task_id):
 
     requested_doors = data.get('door_id')
     door_count = int(data.get('quantity', 1))
+    task_type = data.get('task_type', 'delivery')
     if isinstance(requested_doors, str):
         requested_doors = [requested_doors]
 
@@ -91,11 +92,14 @@ def assign_door_for_package(door_task_id):
     home_point = current_app.home_point
     sn = current_app.config.get('ROBOT_SN')
     active_doors = _get_active_doors(current_app)
-    
-    # [防呆] 檢查機器人是否已經在外送貨或滿載，避免中斷現有任務
-    # full_doors = Door.query.filter_by(sn=sn, status=DoorStatus.FULL.value).order_by(Door.door_number).first()
-    # if full_doors:
-    #     return jsonify({'error': 'Robot is currently out for delivery or fully loaded. Please wait until it returns.', 'status': 'conflict'}), 409
+
+    # === 防呆：檢查機器人是否已經在外執行任務 ===
+    robot_state = RobotState.query.filter_by(sn=sn).first()
+    if robot_state and robot_state.last_point and robot_state.last_point != home_point:
+        return jsonify({
+            'error': 'Robot is currently out for tasks. Please wait until it returns.', 
+            'status': 'conflict'
+        }), 409
     
     # 檢查該包裹是否已經有被指派的艙門
     existing_doors = Door.query.filter_by(sn=sn, door_task_id=door_task_id).order_by(Door.door_number).all()
@@ -112,21 +116,12 @@ def assign_door_for_package(door_task_id):
         if invalid_doors:
             return jsonify({'error': f'Invalid door numbers for current mode: {invalid_doors}'}), 400
 
-        # Idempotent 檢查: 如果傳入的艙門與已指派的完全吻合，直接回傳成功
-        # if set(existing_numbers) == set(requested_doors):
-        #     return jsonify({'status': 'success', 'door_numbers': existing_numbers}), 200
-        # elif existing_numbers:
-        # elif existing_numbers:
-        #     return jsonify({'error': f'Package {door_task_id} is already assigned to {existing_numbers}'}), 409
         # 鎖定指定的艙門並檢查狀態
         target_doors = Door.query.filter(
             Door.sn == sn, 
             Door.door_number.in_(requested_doors)
         ).with_for_update().all()
 
-        # busy_doors = [d.door_number for d in target_doors if d.status != DoorStatus.EMPTY.value]
-        # if busy_doors:
-        #     return jsonify({'error': f'Cannot assign. Doors {busy_doors} are not empty.', 'status': 'conflict'}), 409
         if len(target_doors) != len(requested_doors):
             return jsonify({'error': 'Some requested doors were not found.'}), 400
             
@@ -170,10 +165,13 @@ def assign_door_for_package(door_task_id):
         
         db.session.commit()
 
-        app = current_app._get_current_object()
-        for door_num in assigned_door_numbers:
-            threading.Thread(target=_return_for_assign, args=(app, controller, sn, door_num), daemon=True).start()
-
+        if task_type == 'delivery' or task_type == 'deliver':
+            app = current_app._get_current_object()
+            for door_num in assigned_door_numbers:
+                threading.Thread(target=_return_for_assign, args=(app, controller, sn, door_num), daemon=True).start()
+        else:
+            print(f"[系統] 退件任務 {door_task_id} 分配成功，艙門保持關閉，等待 dispatch 前往住戶家", flush=True)
+            
         return jsonify({
             'status': 'success', 
             'message': f'Assigned doors {assigned_door_numbers} for {door_task_id}',
@@ -215,24 +213,25 @@ def load_package_to_door():
     controller = current_app.pudu_controller
     sn = current_app.config.get('ROBOT_SN')
     
-    # 尋找本機所有狀態為 ASSIGNED 的艙門
-    assigned_doors = Door.query.filter_by(sn=sn, status=DoorStatus.ASSIGNED.value)\
-                        .order_by(Door.door_number)\
-                        .with_for_update()\
-                        .all()
+    # 只找「剛才被打開 (LOADING)」的門，完全略過 ASSIGNED (退貨) 的門
+    opened_doors = Door.query.filter_by(sn=sn, status=DoorStatus.LOADING.value).order_by(Door.door_number).with_for_update().all()
 
-    loaded_doors_info = []
-    control_states = []
+    if not opened_doors:
+        return jsonify({'status': 'success', 'message': 'No open doors found to load.', 'loaded_doors': []}), 200
+    
+    loaded_doors_info, control_states = [], []
 
     try:
-        for door in assigned_doors:
+        for door in opened_doors:
             control_states.append({"operation": False, "door_number": door.door_number})
             door.status = DoorStatus.FULL.value
             loaded_doors_info.append({'door_number': door.door_number, 'door_task_id': door.door_task_id})
 
+        db.session.commit()
+
         if control_states:
             controller.control_doors(sn=sn, control_states=control_states)
-        db.session.commit()
+        
         return jsonify({'status': 'success', 'loaded_doors': loaded_doors_info})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -250,12 +249,13 @@ def robot_dispatch():
     if not target_point: return jsonify({'error': 'point is required'}), 400
     controller = current_app.pudu_controller
     sn = current_app.config.get('ROBOT_SN')
-    print("ok5", flush=True)
 
     if door_task_id:
         robot_state = RobotState.query.filter_by(sn=sn).first()
-        print("ok4", flush=True)
         if robot_state and robot_state.current_task_id and robot_state.last_point == target_point:
+            app = current_app._get_current_object()
+            threading.Thread(target=_poll_notify_display_qr, args=(app, controller, sn, door_task_id, robot_state.current_task_id), daemon=True).start()
+
             return jsonify({
                 'status': 'success',
                 'message': f'Robot is already moving to {target_point}',
@@ -266,16 +266,13 @@ def robot_dispatch():
     try:
         payload = build_custom_call_payload(sn=sn, point=target_point, call_mode='QR_CODE')
         dispatch_res = controller.custom_call2(payload=payload)
-        print("ok3", flush=True)
         task_id = None
         if dispatch_res and dispatch_res.get('message') == 'SUCCESS':
             task_id = dispatch_res.get('data', {}).get('task_id')
-            print("ok2", flush=True)
             update_robot_state(sn, point=target_point, task_id=task_id)
         
         if door_task_id:
             app = current_app._get_current_object()
-            print("ok1", flush=True)
             threading.Thread(target=_poll_notify_display_qr, args=(app, controller, sn, door_task_id, task_id), daemon=True).start()
 
         return jsonify({'status': 'success', 'message': f'Robot is moving to {target_point}', 'task_id': task_id, 'polling': door_task_id is not None})
@@ -292,14 +289,18 @@ def package_pickup_complete(door_task_id):
     doors = Door.query.filter_by(door_task_id=door_task_id, sn=sn).with_for_update().all()
     
     if not doors: return jsonify({'status': 'success', 'message': 'Door task not found.'}), 200
-    if any(d.status == DoorStatus.PICKING.value for d in doors): return jsonify({'status': 'success', 'message': 'Pickup in progress.'}), 200
-    
+    if any(d.status in [DoorStatus.PICKING.value, DoorStatus.PUTTING.value] for d in doors): 
+        return jsonify({'status': 'success', 'message': 'Operation in progress.'}), 200
+
     control_states, door_numbers = [], []
     for d in doors:
-        d.status = DoorStatus.PICKING.value
+        if d.status == DoorStatus.FULL.value:
+            d.status = DoorStatus.PICKING.value  # 送貨：開始取件
+        elif d.status == DoorStatus.ASSIGNED.value:
+            d.status = DoorStatus.PUTTING.value  # 退貨：開始置件
         control_states.append({"operation": True, "door_number": d.door_number})
         door_numbers.append(d.door_number)
-            
+    
     db.session.commit()
 
     robot_state = RobotState.query.filter_by(sn=sn).first()
@@ -317,8 +318,14 @@ def package_pickup_complete(door_task_id):
         time.sleep(6)
         return jsonify({'status': 'success', 'message': f'Doors {door_numbers} opened successfully.'})
     except Exception as e:
-        for d in doors: d.status = DoorStatus.FULL.value
+        for d in doors:
+            if d.status == DoorStatus.PICKING.value:
+                d.status = DoorStatus.FULL.value  # 送貨：回到送件狀態
+            elif d.status == DoorStatus.PUTTING.value:
+                d.status = DoorStatus.ASSIGNED.value  # 退貨：回到指定狀態
+
         db.session.commit()
+
         return jsonify({'error': str(e)}), 500
 
 # ==========================================================
@@ -341,14 +348,19 @@ def package_complete(door_task_id):
                 update_robot_state(sn, clear_task=True)
                 time.sleep(6)
             except Exception: pass
-        
-        control_states = [{"operation": False, "door_number": d.door_number} for d in doors]
-        controller.control_doors(sn=sn, control_states=control_states)
-        
+
+        control_states = []
         for d in doors:
-            d.status = DoorStatus.EMPTY.value
-            d.door_task_id = None
+            if d.status == DoorStatus.PICKING.value:
+                d.status = DoorStatus.EMPTY.value  # 取件完畢：變回空門
+                d.door_task_id = None              # 送貨任務圓滿結束，清空 ID
+            elif d.status == DoorStatus.PUTTING.value:
+                d.status = DoorStatus.FULL.value   # 置件完畢：門內有退件包裹
+            control_states.append({"operation": False, "door_number": d.door_number})
+
         db.session.commit()
+
+        controller.control_doors(sn=sn, control_states=control_states)
         
         is_returning = check_and_return_home_if_empty()
         return jsonify({'status': 'success', 'message': 'Doors closed and freed.', 'returning_home': is_returning})
@@ -364,8 +376,12 @@ def package_cancel(door_task_id):
     sn = current_app.config.get('ROBOT_SN')
 
     doors = Door.query.filter_by(door_task_id=door_task_id, sn=sn).with_for_update().all()
-    if not doors: return jsonify({'status': 'success', 'message': 'Ignored.'}), 200
-    if any(d.status == DoorStatus.PICKING.value for d in doors): return jsonify({'status': 'success', 'message': 'Ignored.'}), 200
+    if not doors: 
+        time.sleep(6)
+        return jsonify({'status': 'success', 'message': 'Ignored.'}), 200
+    if any(d.status == DoorStatus.PICKING.value or d.status == DoorStatus.PUTTING.value for d in doors): 
+        time.sleep(6)
+        return jsonify({'status': 'success', 'message': 'Ignored.'}), 200
     
     try:
         control_states = [{"operation": False, "door_number": d.door_number} for d in doors]
@@ -379,8 +395,17 @@ def package_cancel(door_task_id):
                 update_robot_state(sn, clear_task=True)
             except Exception: pass
         
-        for d in doors: d.status = DoorStatus.FULL.value
+        for d in doors:
+            if d.status == DoorStatus.ASSIGNED.value:
+                # 退貨取消：裡面沒東西，歸還為空門
+                d.status = DoorStatus.EMPTY.value
+                d.door_task_id = None
+            else:
+                # 送貨拒收：裡面有原本的包裹，鎖定為 FULL 帶回
+                d.status = DoorStatus.FULL.value
+
         db.session.commit()
+
         time.sleep(6)
         
         return jsonify({'status': 'success', 'message': f'Package {door_task_id} rejected. Reset to FULL.'})
@@ -396,8 +421,8 @@ def return_packages_to_home():
     home_point = current_app.home_point
     sn = current_app.config.get('ROBOT_SN')
 
-    full_doors = Door.query.filter_by(sn=sn, status=DoorStatus.FULL.value).all()
-    if not full_doors: return jsonify({'status': 'success', 'message': 'No returned packages.'})
+    #full_doors = Door.query.filter_by(sn=sn, status=DoorStatus.FULL.value).all()
+    #if not full_doors: return jsonify({'status': 'success', 'message': 'No returned packages.'})
     
     robot_state = RobotState.query.filter_by(sn=sn).first()
     if robot_state and robot_state.last_point == home_point:
@@ -570,7 +595,10 @@ def robot_recall():
     move_state = live_status.get('move_state')
     
     # 檢查是否有門正在 PICKING (已掃碼，門已開，等待 Complete 關門)
-    is_picking = any(door.status == DoorStatus.PICKING.value for door in active_doors)
+    is_picking = any(
+        door.status in [DoorStatus.PICKING.value, DoorStatus.PUTTING.value] 
+        for door in active_doors
+    )
     
     # 取得唯一任務 ID 與當前點位
     robot_state = RobotState.query.filter_by(sn=sn).first()
@@ -635,7 +663,7 @@ def robot_recall():
         recalled_doors = []
         for door in active_doors:
             # 遭遇 Recall，只要是處理到一半的狀態，通通強制轉為 FULL 保護起來
-            if door.status in [DoorStatus.PICKING.value, DoorStatus.ASSIGNED.value]:
+            if door.status in [DoorStatus.PICKING.value, DoorStatus.ASSIGNED.value, DoorStatus.PUTTING.value, DoorStatus.LOADING.value]:
                 door.status = DoorStatus.FULL.value
                 recalled_doors.append(door.door_number)
             elif door.status == DoorStatus.FULL.value:
