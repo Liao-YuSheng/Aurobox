@@ -17,15 +17,21 @@ def push_arrival_notification(line_user_id: str, package_id: str, unit: str, qua
     """推播到貨通知，附「取貨」「預約取貨」「不收」三個按鈕。quantity是這個任務代表幾件實體包裹"""
     header_text = "有新包裹送達" if quantity <= 1 else f"有{quantity}件新包裹送達"
 
-    # 預約取貨的時間選擇範圍：從下一個整點開始，開放到7天後的整點，
-    # 只能選未來的時段，且只能選整點（LINE的datetimepicker本身可以選到分鐘，
+    # 預約取貨的時間選擇範圍：min直接用「現在」這個時間點，不要進位到下一個
+    # 整點——半點制的捨入規則（main.py的parse_and_round_schedule_datetime）
+    # 允許選當前小時內半點以前的時間去預約「當前這個時段」，如果min被設成
+    # 下一個整點，時間滾輪會把整個當前小時都反灰，等於選不到本該可以選的
+    # 時間。滾輪只需要擋掉「過去的時間」，該捨入成哪個時段是後端的邏輯，
+    # 兩邊職責分開。
+    # initial（picker打開時預設顯示的時間）維持選下一個整點，開放範圍到
+    # 7天後的整點，只能選整點（LINE的datetimepicker本身可以選到分鐘，
     # 「只能整點」這件事實際上是收到postback後在後端把分鐘部分捨去強制執行的，
     # 不是LINE picker原生就能限制只能選整點）
     now = now_taipei()
     next_hour = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
     max_time = next_hour + timedelta(days=7)
     initial_str = next_hour.strftime("%Y-%m-%dT%H:%M")
-    min_str = next_hour.strftime("%Y-%m-%dT%H:%M")
+    min_str = now.strftime("%Y-%m-%dT%H:%M")
     max_str = max_time.strftime("%Y-%m-%dT%H:%M")
 
     body_contents = [
@@ -33,10 +39,10 @@ def push_arrival_notification(line_user_id: str, package_id: str, unit: str, qua
     ]
     if quantity > 1:
         body_contents.append(
-            {"type": "text", "text": f"共 {quantity} 件包裹，將一次出貨", "wrap": True, "size": "sm", "color": "#029C4D"}
+            {"type": "text", "text": f"共{quantity}件，將一次出貨", "wrap": True, "size": "sm", "color": "#029C4D"}
         )
     body_contents.append(
-        {"type": "text", "text": "※ 預約取貨僅開放整點時段，系統會自動進位到下一個整點作為時段起點", "size": "xs", "color": "#999999", "wrap": True, "margin": "md"}
+        {"type": "text", "text": "※ 預約以整點時段計算：半點前算當前時段，半點後算下一時段", "size": "xs", "color": "#999999", "wrap": True, "margin": "md"}
     )
 
     contents = {
@@ -138,16 +144,39 @@ def push_status_update(line_user_id: str, text: str):
         )
 
 
-def push_arrived_notification(line_user_id: str, package_id: str, quantity: int = 1):
-    """機器人抵達時，推播提醒+開啟掃碼+拒收按鈕"""
-    body_text = "請於 10 分鐘內完成取貨" if quantity <= 1 else f"共{quantity}件包裹，掃描後將開啟{quantity}個艙門，請於 10 分鐘內完成取貨"
+def push_arrived_notification(line_user_id: str, door_task_id: str, quantity: int = 1, task_type: str = "delivery"):
+    """
+    機器人抵達時，推播提醒+開啟掃碼+拒收/取消按鈕。
+
+    door_task_id取代了原本的package_id：同一個收件人這一輪如果用了不只一扇門
+    （例如中、小兩件包裹放在同一戶但不同艙門），door_task_id是同一組值，
+    LIFF連結跟按鈕都帶這個值——住戶不管掃哪一扇門的QR、或按取消，
+    都會一次處理「這個task底下所有的門」，不用逐扇門各自操作一次。
+    quantity是這個task底下總共幾件實體包裹（可能橫跨多扇門），純粹顯示用途。
+
+    task_type區分「delivery」（送貨，機器人帶包裹來給住戶）跟「return」
+    （退貨，住戶請機器人來收件送回管理室）——兩種方向文案不同，但呼叫機器人
+    的API完全一樣（沿用同一套door-tasks端點），只是這裡顯示給住戶看的文字換掉。
+    """
+    if task_type == "return":
+        header_text = "機器人已抵達，可以退貨了" if quantity <= 1 else f"機器人已抵達，可退貨（共{quantity}件）"
+        body_text = "掃碼開啟艙門，放入物品後在此頁按「放貨完成」關門" if quantity <= 1 \
+            else f"掃碼開啟對應的{quantity}個艙門，放入物品後在此頁按「放貨完成」關門"
+        cancel_label = "暫時不退貨"
+        cancel_action = "CANCEL_RETURN"
+    else:
+        header_text = "機器人已抵達" if quantity <= 1 else f"機器人已抵達（共{quantity}件）"
+        body_text = "請於 8 分鐘內完成取貨" if quantity <= 1 else f"共{quantity}件，掃碼後開啟對應艙門，請於 8 分鐘內完成取貨"
+        cancel_label = "拒收"
+        cancel_action = "REJECT_AT_DOOR"
+
     contents = {
         "type": "bubble",
         "header": {
             "type": "box",
             "layout": "vertical",
             "contents": [
-                {"type": "text", "text": "機器人已抵達", "weight": "bold", "size": "lg"}
+                {"type": "text", "text": header_text, "weight": "bold", "size": "lg"}
             ],
         },
         "body": {
@@ -169,7 +198,7 @@ def push_arrived_notification(line_user_id: str, package_id: str, quantity: int 
                     "action": {
                         "type": "uri",
                         "label": "開啟相機掃碼",
-                        "uri": f"https://liff.line.me/{settings.LIFF_ID}?package_id={package_id}",
+                        "uri": f"https://liff.line.me/{settings.LIFF_ID}?door_task_id={door_task_id}&task_type={task_type}",
                     },
                 },
                 {
@@ -177,8 +206,8 @@ def push_arrived_notification(line_user_id: str, package_id: str, quantity: int 
                     "style": "secondary",
                     "action": {
                         "type": "postback",
-                        "label": "拒收",
-                        "data": f"action=REJECT_AT_DOOR&package_id={package_id}",
+                        "label": cancel_label,
+                        "data": f"action={cancel_action}&door_task_id={door_task_id}",
                     },
                 },
             ],
@@ -190,14 +219,20 @@ def push_arrived_notification(line_user_id: str, package_id: str, quantity: int 
         line_bot_api.push_message(
             PushMessageRequest(
                 to=line_user_id,
-                messages=[FlexMessage(alt_text="機器人已抵達", contents=FlexContainer.from_dict(contents))],
+                messages=[FlexMessage(alt_text=header_text, contents=FlexContainer.from_dict(contents))],
             )
         )
 
 
 
 def push_pickup_complete_button(line_user_id: str, package_id: str, quantity: int = 1):
-    """掃碼驗證通過、艙門已開啟後，推播讓用戶確認取貨完成的按鈕"""
+    """
+    掃碼驗證通過、艙門已開啟後，推播讓用戶確認取貨完成的按鈕。
+
+    ⚠️ 這支函式目前main.py沒有任何地方呼叫——取貨完成已經改成LIFF頁面掃碼
+    驗證成功後，直接在同一頁顯示「取貨完成」鍵（呼叫/door-tasks/{door_task_id}/complete），
+    不再透過LINE推播這顆按鈕。保留這支函式定義只是還沒清掉，沒有實際作用。
+    """
     body_text = "艙門已開啟，請取出包裹" if quantity <= 1 else f"{quantity}個艙門已開啟，請取出{quantity}件包裹"
     contents = {
         "type": "bubble",

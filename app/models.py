@@ -31,10 +31,15 @@ class Package(Base):
     unit = Column(String(50), nullable=False)                  # 門牌
     line_user_id = Column(String(100), nullable=False)         # 收件人 LINE User ID
     status = Column(String(30), nullable=False, default="pending")
+    task_type = Column(String(20), nullable=False, default="delivery")  # delivery（送貨，管理員建立）/ return（退貨，住戶主動申請）
     package_count = Column(Integer, nullable=False, default=1)  # 這個任務代表幾件實體包裹（1-4），決定要開幾個艙門
     # pending / pickup_now / delivering / arrived
     # / completed / returned_timeout / voided / rejected_at_door
     door_id = Column(String(10), nullable=True)                # 分配的艙門編號
+    door_task_id = Column(UUID(as_uuid=True), nullable=True)    # 這個門「這一次」被使用的任務ID，同一個門不同次使用會是不同ID
+                                                                  # 同一個door_task_id底下的所有包裹，狀態轉換（抵達/驗證/完成/拒收/逾時）全部綁在一起走
+    creation_batch_id = Column(UUID(as_uuid=True), nullable=True)  # 建立包裹時quantity>1，同一批N筆包裹共用這個ID
+                                                                     # 只發一次到貨通知，但住戶按取貨/預約/不收時要一次套用到整批
     door_assigned_at = Column(DateTime, nullable=True)          # 艙門分配（放置包裹開門）的時間，逾時判斷用
     stop_dispatched_at = Column(DateTime, nullable=True)        # 這一站真正呼叫/api/robot/dispatch派送出去的時間，防止並發重複派送同一站
     arrived_at = Column(DateTime, nullable=True)                # 機器人抵達時間，逾時判斷用
@@ -49,6 +54,7 @@ class Package(Base):
     created_at = Column(DateTime, default=now_taipei)
     updated_at = Column(DateTime, default=now_taipei, onupdate=now_taipei)
     case_closed_at = Column(DateTime, nullable=True)
+    return_retrieved_at = Column(DateTime, nullable=True)  # 退貨任務：管理員確認已從艙門取出退貨件的時間
 
 
 class LineBinding(Base):
@@ -94,7 +100,8 @@ class TaskLog(Base):
     # / force_resolved
     # / pickup_scheduled
     # / multi_package_assigned
-    # / task_recalled / package_deleted
+    # / task_recalled / package_deleted / door_released_manually
+    # / return_requested / return_retrieved / return_cancelled
     level = Column(String(10), nullable=False, default="info")  # info / warning / error
     detail = Column(String(500), nullable=True)
     created_at = Column(DateTime, default=now_taipei)
