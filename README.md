@@ -215,12 +215,17 @@ GRANT ALL PRIVILEGES ON DATABASE aurobox_db TO myuser;
 sudo systemctl status postgresql --no-pager
 ```
 
+進入資料庫：
 ```bash
 sudo -u postgres psql
 \c aurobox_db
 ```
 
-
+重建資料庫：
+```bash
+DROP SCHEMA public CASCADE;
+CREATE SCHEMA public;
+```
 3. 建立 .env（可由 .env.example 複製）
 
 ```env
