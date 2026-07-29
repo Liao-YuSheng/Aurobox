@@ -15,6 +15,77 @@ _assign_lock = threading.Lock()
 _assign_queue = queue.Queue()
 _recall_lock = threading.Lock()
 
+def _queue_door_action(
+    app,
+    controller,
+    sn: str,
+    door_number: str,
+    action: str,  # 新增參數： 'OPEN' 或 'CLOSE'
+    timeout_seconds: int = 300,
+    poll_interval: int = 5,
+):
+    """
+    背景執行緒：統籌處理艙門動作請求 (開或關)，確保依序執行。
+    """
+    # 1. 把動作與門號一起塞進佇列，例如 ("OPEN", "H_01")
+    _assign_queue.put((action, door_number))
+    
+    # 2. 確保同一時間只有一個執行緒在處理佇列
+    if not _assign_lock.acquire(blocking=False):
+        print(f"[系統] 已有統籌執行緒在運作，新任務 ({action} 艙門 {door_number}) 已加入佇列等待。", flush=True)
+        return
+
+    try:
+        with app.app_context():
+            # 只有當我們需要「開門(OPEN)」時，才需要等機器人回管理室
+            # 如果是單純排隊要「關門(CLOSE)」，就不強制等，直接執行
+            needs_to_wait = any(item[0] == "OPEN" for item in list(_assign_queue.queue))
+            
+            if needs_to_wait:
+                time.sleep(10)
+                print(f"[系統] 開始輪詢機器人是否抵達管理室", flush=True)
+                arrived = controller.wait_until_arrived(
+                    sn=sn,
+                    timeout_seconds=timeout_seconds,
+                    poll_interval=poll_interval,
+                )
+                if not arrived:
+                    print(f"[系統] 輪詢超時，機器人未能在預期時間內抵達", flush=True)
+                    while not _assign_queue.empty():
+                        _assign_queue.get()
+                    return
+                print(f"[系統] 機器人已抵達，準備依序執行佇列中的艙門動作...", flush=True)
+
+            # 3. 依序執行動作
+            while True:
+                if _assign_queue.empty():
+                    break
+                    
+                current_action, current_door = _assign_queue.get()
+                
+                try:
+                    if current_action == "OPEN":
+                        controller.control_doors(sn=sn, control_states=[{"operation": True, "door_number": current_door}])
+                        door_record = Door.query.filter_by(sn=sn, door_number=current_door).first()
+                        if door_record and door_record.status == DoorStatus.ASSIGNED.value:
+                            door_record.status = DoorStatus.LOADING.value
+                            db.session.commit()
+                        print(f"[系統] 成功開啟艙門 {current_door}", flush=True)
+                        
+                    elif current_action == "CLOSE":
+                        controller.control_doors(sn=sn, control_states=[{"operation": False, "door_number": current_door}])
+                        # 關門的 DB 狀態更新會交由呼叫這支 API 的主程式 (assign-timeout) 處理，
+                        # 這裡只負責卡住硬體的排隊順序
+                        print(f"[系統] 成功關閉艙門 {current_door}", flush=True)
+                        
+                    time.sleep(1.5)  # 每個動作之間保留 1.5 秒的硬體緩衝時間
+                    
+                except Exception as e:
+                    print(f"[系統] 艙門動作失敗 ({current_action} 艙門 {current_door}): {e}", flush=True)
+                    
+    finally:
+        _assign_lock.release()
+
 def _return_for_assign(
     app,
     controller,

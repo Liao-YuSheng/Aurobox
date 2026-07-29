@@ -8,7 +8,7 @@ from .models import Door, DoorStatus, RobotState
 
 from .utils import build_custom_call_payload
 from .services import update_robot_state, check_and_return_home_if_empty
-from .tasks import _return_for_assign, _poll_notify_display_qr
+from .tasks import _return_for_assign, _poll_notify_display_qr, _queue_door_action
 
 api_bp = Blueprint('api', __name__)
 
@@ -82,6 +82,7 @@ def assign_door_for_package(door_task_id):
     data = request.get_json(silent=True) or {}
     print(data, flush=True)
 
+    package_id = data.get('package_id')
     requested_doors = data.get('door_id')
     door_count = int(data.get('quantity', 1))
     task_type = data.get('task_type', 'delivery')
@@ -146,7 +147,10 @@ def assign_door_for_package(door_task_id):
         doors_to_assign = empty_doors
     # ================= 共用邏輯: 呼叫機器人回管理室並更新資料庫 =================
     try:
-        already_assigning = Door.query.filter_by(sn=sn, status=DoorStatus.ASSIGNED.value).first()
+        already_assigning = Door.query.filter(
+            Door.sn == sn,
+            Door.status.in_([DoorStatus.ASSIGNED.value, DoorStatus.LOADING.value])
+        ).first()
         
         if already_assigning:
             print(f"[系統] 機器人正在裝載中，強制省略導航指令", flush=True)
@@ -168,7 +172,7 @@ def assign_door_for_package(door_task_id):
         if task_type == 'delivery' or task_type == 'deliver':
             app = current_app._get_current_object()
             for door_num in assigned_door_numbers:
-                threading.Thread(target=_return_for_assign, args=(app, controller, sn, door_num), daemon=True).start()
+                threading.Thread(target=_queue_door_action, args=(app, controller, sn, door_num, "OPEN"), daemon=True).start()
         else:
             print(f"[系統] 退件任務 {door_task_id} 分配成功，艙門保持關閉，等待 dispatch 前往住戶家", flush=True)
             
@@ -189,7 +193,11 @@ def package_assign_timeout(door_task_id):
     controller = current_app.pudu_controller
     sn = current_app.config.get('ROBOT_SN')
 
-    doors = Door.query.filter_by(door_task_id=door_task_id, sn=sn, status=DoorStatus.ASSIGNED.value).with_for_update().all()
+    doors = Door.query.filter(
+        Door.door_task_id == door_task_id,
+        Door.sn == sn,
+        Door.status.in_([DoorStatus.ASSIGNED.value, DoorStatus.LOADING.value])
+    ).with_for_update().all()
     if not doors: return jsonify({'status': 'success', 'message': 'No ASSIGNED doors found.'}), 200
 
     try:
@@ -201,8 +209,15 @@ def package_assign_timeout(door_task_id):
             d.door_task_id = None
             door_numbers.append(d.door_number)
         db.session.commit()
+
+        app = current_app._get_current_object()
+        from .tasks import _queue_door_action
+        for d_num in door_numbers:
+            threading.Thread(target=_queue_door_action, args=(app, controller, sn, d_num, "CLOSE"), daemon=True).start()
+
         return jsonify({'status': 'success', 'message': f'Assign timeout handled. Doors {door_numbers} closed.'})
     except Exception as e:
+        db.session.rollback()
         return jsonify({'error': str(e)}), 500
 
 # ==========================================================
