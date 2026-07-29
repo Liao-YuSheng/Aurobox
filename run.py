@@ -31,7 +31,7 @@ def main():
     # 【最關鍵的修改】將預設 host 從 127.0.0.1 改為 0.0.0.0
     # 這樣 Ngrok、Cloudflare 或同一台 WiFi 下的手機與雲端大腦，才能順利連進來！
     parser.add_argument('--host', default='0.0.0.0', help='Server host')
-    parser.add_argument('--port', type=int, default=5000, help='Server port')
+    parser.add_argument('--port', type=int, default=6000, help='Server port')
     # 開發期間，建議啟動時加上 --debug 參數
     parser.add_argument('--debug', action='store_true', help='Enable debug mode')
     
