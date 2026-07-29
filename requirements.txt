@@ -6,3 +6,4 @@ sqlalchemy==2.0.35
 apscheduler==3.10.4
 pydantic-settings==2.5.2
 psycopg[binary]>=3.2.10
+psycopg2-binary
