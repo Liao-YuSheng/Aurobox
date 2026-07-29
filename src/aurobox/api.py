@@ -643,24 +643,16 @@ def robot_recall():
             'queued': True,
             'returning_home': False
         }), 200
-    '''
-    if not active_task_id:
-        return jsonify({
-            'status': 'error',
-            'message': 'Cannot recall: No active task_id found in RobotState to cancel.',
-            'protected_doors': [],
-            'returning_home': False
-        }), 400'''
 
     try:
         # 發送 Cancel 取消任務
-        try:
-            controller.custom_call_cancel({"task_id": active_task_id})
-            print(f"[系統] 成功發送 Cancel 註銷任務 {active_task_id}，等待硬體重置...", flush=True)
-        except Exception as e:
-            print(f"[系統] 註銷任務 {active_task_id} 發生異常: {e}", flush=True)
-            #return jsonify({'status': 'success', 'message': f'Robot is already returning.'}), 200
-
+        if active_task_id:
+            try:
+                controller.custom_call_cancel({"task_id": active_task_id})
+                print(f"[系統] 成功發送 Cancel 註銷任務 {active_task_id}，等待硬體重置...", flush=True)
+            except Exception as e:
+                print(f"[系統] 註銷任務 {active_task_id} 發生異常: {e}", flush=True)
+            
         update_robot_state(sn, clear_task=True)
         # 物理緩衝：等待硬體完全註銷舊路線，回到 IDLE
         time.sleep(6)
