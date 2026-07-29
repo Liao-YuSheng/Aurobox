@@ -786,7 +786,7 @@ def try_assign_door(package_id: str, door_id: str, door_task_id, db: Session) ->
 
     ok, resp, error = call_robot_api(
         "POST", f"/api/door-tasks/{door_task_id}/assign",
-        json={"door_id": door_id, "quantity": quantity, "task_type": task_type},
+        json={"door_id": door_id, "quantity": quantity, "task_type": task_type, "package_id": package_id},
     )
     if not ok:
         no_door_available = resp is not None and resp.status_code in (400, 409)
@@ -1067,10 +1067,10 @@ def handle_postback(data: str, reply_token: str, triggered_by: str, postback_par
                 reply_text(reply_token, "已為您取消這次收件，包裹不會派送，將維持在管理室")
                 send_pending_pickup_notification_for_group(db, group)
 
-                # triggered_binding = db.query(LineBinding).filter(
-                #     LineBinding.line_user_id == triggered_by
-                # ).first()
-                # triggered_name = triggered_binding.name if triggered_binding else "同門牌住戶"
+                triggered_binding = db.query(LineBinding).filter(
+                    LineBinding.line_user_id == triggered_by
+                ).first()
+                triggered_name = triggered_binding.name if triggered_binding else "同門牌住戶"
 
                 for line_user_id in get_recipients(db, package_id):
                     if line_user_id != triggered_by:
@@ -1962,8 +1962,8 @@ async def admin_daily_report(date: str, db: Session = Depends(get_db)):
 def resolve_door_choice(db: Session, package: Package, door_id: str) -> dict:
     """
     共用邏輯：管理員選了一扇門之後，決定「加入既有task」還是「開新task叫機器人開門」。
-    place_package（第一次放置）跟reselect_door（放置後改選別的門）都呼叫這支，
-    確保兩邊判斷邏輯完全一致，不會各自維護一份、之後改一邊忘記改另一邊。
+    place_package唯一的呼叫端（釋放艙門之後重新選門，也是走這支place_package，
+    不再有獨立的reselect流程），確保只有一份判斷邏輯，不會分散在多處各自維護。
 
     「同一組door_task_id」的判斷條件是 line_user_id + unit + task_type 三者都相同——
     unit這個條件很關鍵：door_task_id代表的是「機器人這一趟要去的同一個實際地點」，
@@ -2089,20 +2089,29 @@ async def place_package(package_id: str, payload: PlacePackageRequest, db: Sessi
     return resolve_door_choice(db, package, door_id)
 
 
-@app.post("/packages/{package_id}/reselect-door", dependencies=[Depends(require_admin_auth)])
-async def reselect_door(package_id: str, payload: PlacePackageRequest, db: Session = Depends(get_db)):
+@app.post("/packages/{package_id}/release-door", dependencies=[Depends(require_admin_auth)])
+async def release_door(package_id: str, db: Session = Depends(get_db)):
     """
-    管理員在「已放置、還沒派送」的包裹上，改選另一扇門。跟release-door不同：
-    release-door的前提是「管理員已經手動處理過物理艙門」，完全不呼叫機器人；
-    這支的前提是原本那扇門可能還physically開著、什麼都還沒放進去，所以要看情況
-    決定要不要通知機器人真的釋放原本那扇門：
-    - 原本那扇門只有這一筆包裹在用（沒有同收件人的其他包裹共用）：
-      呼叫機器人 /assign-timeout 把它真的釋放成empty（跟8分鐘自動逾時釋放
-      用同一支API，只是這裡是管理員手動觸發）
-    - 原本那扇門還有其他包裹共用（例如同收件人的另一件用同一扇門）：
-      不動那扇實體門，只把這一筆從裡面移出去，門留給還在用的其他包裹
+    管理員釋放這筆包裹目前佔用的艙門，把它從「已放置」退回「待放置」狀態，
+    之後才能重新選另一扇門——艙門重選機制刻意設計成「一定要先釋放才能重選」，
+    不再像舊版reselect-door那樣一次動作同時做「釋放舊門+指派新門」：那種寫法
+    管理員很容易沒注意到舊門其實還沒真的處理好，畫面就已經跳到新選擇上。
+    現在畫面上有door_id的包裹只會顯示「釋放」按鈕，釋放完成、door_id清空之後，
+    畫面自然會換成跟第一次放置包裹一樣的選門下拉選單，走同一套判斷邏輯
+    （見resolve_door_choice）。
 
-    移出去之後，新選的門走跟放置包裹一樣的判斷邏輯（見resolve_door_choice）。
+    這扇門要不要真的呼叫機器人釋放，要看有沒有「同收件人的其他包裹」還在共用
+    同一個door_task_id：
+    - 沒有其他包裹共用：呼叫機器人 /assign-timeout，把這扇門真的釋放成empty
+      （跟8分鐘自動逾時釋放用同一支API，這裡是管理員手動觸發）
+    - 還有其他包裹共用（例如同收件人另一件用同一扇門）：不動那扇實體門，
+      只把這一筆從裡面移出去，門留給還在用的其他包裹——這種情況下艙門實際
+      狀態不會變成empty，因為它本來就還有其他東西正在使用
+
+    只允許 status=pickup_now 且已經有door_id（已放置、還沒派送）的包裹使用。
+    delivering／arrived這兩個狀態代表機器人已經實際出發了，不能用這支繞過去，
+    這兩種情況要嘛等它自然跑完流程，要嘛用「叫回機器人」真的去中斷機器人的
+    任務、把門打開。
     """
     package = get_package_or_404(db, package_id)
 
@@ -2114,16 +2123,11 @@ async def reselect_door(package_id: str, payload: PlacePackageRequest, db: Sessi
 
     if package.status != "pickup_now" or package.door_id is None:
         db.rollback()
-        raise HTTPException(status_code=400, detail="只有已放置、還沒派送的包裹可以重新選擇艙門")
-
-    new_door_id = payload.door_id
-    if not new_door_id:
-        db.rollback()
-        raise HTTPException(status_code=400, detail="請選擇要換到哪一扇艙門")
-
-    if new_door_id == package.door_id:
-        db.rollback()
-        raise HTTPException(status_code=400, detail="這已經是目前的艙門，不需要重選")
+        raise HTTPException(
+            status_code=400,
+            detail=f"這筆包裹目前狀態是 {package.status}、艙門是 {package.door_id or '尚未分配'}，"
+                   f"不是「已放置、等待派送」的狀態，無法釋放",
+        )
 
     old_door_id = package.door_id
     old_door_task_id = package.door_task_id
@@ -2144,55 +2148,15 @@ async def reselect_door(package_id: str, payload: PlacePackageRequest, db: Sessi
         )
         if not ok:
             db.rollback()
-            raise HTTPException(status_code=502, detail=f"釋放原本的艙門 {old_door_id} 失敗，請稍後再試：{error}")
-        log_event(db, "assign_timeout", detail=f"管理員重新選擇艙門，主動釋放原本的 {old_door_id}", package_id=package.id)
-
-    package.door_id = None
-    package.door_task_id = None
-    package.door_assigned_at = None
-    db.commit()
-
-    return resolve_door_choice(db, package, new_door_id)
-
-
-@app.post("/packages/{package_id}/release-door", dependencies=[Depends(require_admin_auth)])
-async def release_door(package_id: str, db: Session = Depends(get_db)):
-    """
-    管理員已經手動處理過艙門的物理狀態（例如直接在機器人狀態欄按「開啟艙門」「關閉艙門」
-    把包裹拿出來），但這筆包裹的door_id還留在資料庫裡，導致例如刪除包裹這類「艙門使用中
-    不給動」的防呆一直卡住，實際上艙門早就空了。這支讓資料庫紀錄追上物理現實。
-
-    刻意不呼叫機器人任何API——用這支的前提就是「管理員已經自己手動處理過艙門了」。
-    如果艙門其實還沒處理、機器人身上還真的卡著包裹，請用「叫回機器人」而不是這支，
-    那支才會真的通知機器人中斷任務、把門打開。
-
-    只允許 status=pickup_now 且已經有door_id（已放置、還沒派送）的包裹使用。
-    delivering／arrived這兩個狀態代表機器人已經實際出發了，不能只憑管理員自己說
-    「已經處理好了」就放行，這兩種情況要嘛等它自然跑完流程，要嘛用「叫回機器人」
-    真的去中斷機器人的任務，不能繞過。
-    """
-    package = get_package_or_404(db, package_id)
-
-    try:
-        db.refresh(package, with_for_update={"nowait": True})
-    except OperationalError:
-        db.rollback()
-        raise HTTPException(status_code=409, detail="這筆包裹正在被其他操作處理中，請稍候再試")
-
-    if package.status != "pickup_now" or package.door_id is None:
-        db.rollback()
-        raise HTTPException(
-            status_code=400,
-            detail=f"這筆包裹目前狀態是 {package.status}、艙門是 {package.door_id or '尚未分配'}，"
-                   f"不是「已放置、等待派送」的狀態，無法用這支釋放",
+            raise HTTPException(status_code=502, detail=f"呼叫機器人釋放艙門 {old_door_id} 失敗，請稍後再試：{error}")
+        log_event(db, "assign_timeout", detail=f"管理員手動釋放艙門 {old_door_id}", package_id=package.id)
+    else:
+        log_event(
+            db, "door_released_manually",
+            detail=f"艙門 {old_door_id} 還有同收件人其他包裹共用，只把這筆移出，不呼叫機器人",
+            package_id=package.id,
         )
 
-    old_door_id = package.door_id
-    log_event(
-        db, "door_released_manually",
-        detail=f"管理員手動釋放艙門紀錄（原艙門 {old_door_id}），未呼叫機器人，前提是已手動處理過物理艙門",
-        package_id=package.id,
-    )
     package.door_id = None
     package.door_task_id = None
     package.door_assigned_at = None
@@ -4126,14 +4090,12 @@ function renderPackageTable(pageItems, totalPages) {
 
     // 拒收/逾時/不收這幾個狀態的操作按鈕，已經統一在上面的紅色提示框處理了，
     // 這裡不再重複放按鈕，避免同一筆包裹在畫面上出現兩個功能一樣的按鈕。
-    // pickup_now分兩種：還沒放置（要按「放置包裹」呼叫機器人開門）、已放置（等批次派送，不用按鈕）
+    // pickup_now分三種：還沒放置（要按「放置包裹」呼叫機器人開門）、已放置
+    // （只顯示「釋放」，一定要先釋放才能重新選門——見releaseDoor）、等批次派送
     let action;
     if (p.status === 'pickup_now') {
       if (p.door_id) {
-        action = `<div style="display:flex;justify-content:space-between;align-items:center;gap:6px;">
-          ${buildDoorPlacementSelect(p, 'reselect')}
-          <button class="secondary" onclick="releaseDoor(this, '${p.id}')" title="已經手動處理過艙門，只清除系統紀錄，不會呼叫機器人">釋放</button>
-        </div>`;
+        action = `<button class="secondary" onclick="releaseDoor(this, '${p.id}')" title="呼叫機器人釋放這扇艙門，釋放後才能重新選擇">釋放</button>`;
       } else if (p.scheduled_pickup_at && new Date(p.scheduled_pickup_at) > now) {
         action = `<span style="opacity:0.6;">預約中，未到時間</span>`;
       } else {
@@ -4552,12 +4514,10 @@ async function placePackage(selectEl, packageId) {
   }
 }
 
-function buildDoorPlacementSelect(p, mode) {
-  mode = mode || 'place';
+function buildDoorPlacementSelect(p) {
   // 用packagesById（loadLivePackages抓到的所有進行中包裹）算出這一輪裡
   // 每扇門目前被哪個收件人（line_user_id）佔用——door_task_id有值代表
-  // 這一輪已經開過，不是舊資料殘留。重選模式要把自己排除，不然會把自己
-  // 目前佔用的門誤判成「別人在用」
+  // 這一輪已經開過，不是舊資料殘留。
   const doorOccupants = {};
   for (const key in packagesById) {
     const other = packagesById[key];
@@ -4574,9 +4534,6 @@ function buildDoorPlacementSelect(p, mode) {
     const physical = latestDoorStates.find(d => d.door_number === doorId);
     const occupantLineUserId = doorOccupants[doorId];
 
-    if (mode === 'reselect' && doorId === p.door_id) {
-      return `<option value="${doorId}" selected>${doorId}（目前使用中）</option>`;
-    }
     if (occupantLineUserId) {
       if (occupantLineUserId === p.line_user_id) {
         return `<option value="${doorId}">${doorId}（加入本人已開啟）</option>`;
@@ -4589,39 +4546,17 @@ function buildDoorPlacementSelect(p, mode) {
     return `<option value="${doorId}">${doorId}</option>`;
   }).join('');
 
-  const placeholder = mode === 'reselect' ? '' : `<option value="" selected disabled>請選擇艙門</option>`;
-  const handler = mode === 'reselect' ? 'reselectDoor' : 'placePackage';
-
-  return `<select onchange="${handler}(this, '${p.id}')" style="max-width:190px;">
-    ${placeholder}
+  return `<select onchange="placePackage(this, '${p.id}')" style="max-width:190px;">
+    <option value="" selected disabled>請選擇艙門</option>
     ${options}
   </select>`;
 }
 
-async function reselectDoor(selectEl, packageId) {
-  const doorId = selectEl.value;
-  if (!doorId) return;
-  selectEl.disabled = true;
-  try {
-    const resp = await fetch(`/packages/${packageId}/reselect-door`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ door_id: doorId }),
-    });
-    const data = await resp.json();
-    if (!resp.ok) throw new Error(data.detail || '重選艙門失敗');
-    loadPackages();
-  } catch (e) {
-    alert('重選艙門失敗：' + e.message);
-    selectEl.disabled = false;
-  }
-}
-
 async function releaseDoor(btn, packageId) {
-  if (!confirm('確定艙門已經手動處理完成了嗎？這個動作只會清除系統裡的艙門紀錄，不會呼叫機器人。如果艙門實際上還卡著包裹，請改用「叫回機器人」。')) return;
+  if (!confirm('確定要釋放這扇艙門嗎？機器人會關閉這扇門並將狀態改回空的，釋放後才能重新選擇艙門。')) return;
   btn.disabled = true;
   const originalText = btn.textContent;
-  btn.textContent = '處理中...';
+  btn.textContent = '釋放中...';
   try {
     const resp = await fetch(`/packages/${packageId}/release-door`, { method: 'POST' });
     const data = await resp.json();
