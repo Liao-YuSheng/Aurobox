@@ -105,7 +105,7 @@ def assign_door_for_package(door_task_id):
     # 檢查該包裹是否已經有被指派的艙門
     existing_doors = Door.query.filter_by(sn=sn, door_task_id=door_task_id).order_by(Door.door_number).all()
     existing_numbers = [d.door_number for d in existing_doors]
-
+    
     doors_to_assign = []
 
     # ================= A: 外部明確指定艙門 =================
