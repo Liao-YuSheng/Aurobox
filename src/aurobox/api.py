@@ -8,7 +8,7 @@ from .models import Door, DoorStatus, RobotState
 
 from .utils import build_custom_call_payload
 from .services import update_robot_state, check_and_return_home_if_empty
-from .tasks import _return_for_assign, _poll_notify_display_qr, _queue_door_action
+from .tasks import _poll_notify_display_qr, _queue_door_action, _poll_and_update_location
 
 api_bp = Blueprint('api', __name__)
 
@@ -59,7 +59,14 @@ def robot_recharge():
         
         # 3. 將機器人的最後點位更新為充電站，task_id為移動去充電站的任務ID (若有)
         task_id = response.get('data', {}).get('task_id') if response and response.get('message') == 'SUCCESS' else None
-        update_robot_state(sn, point=charge_point, task_id=task_id)
+        update_robot_state(sn, task_id=task_id)
+
+        app = current_app._get_current_object()
+        threading.Thread(
+            target=_poll_and_update_location, 
+            args=(app, controller, sn, charge_point), 
+            daemon=True
+        ).start()
         
         print(f"[系統] 返回充電站指令發送成功，回應: {response}", flush=True)
         
@@ -159,7 +166,7 @@ def assign_door_for_package(door_task_id):
             result = controller.custom_call2(payload=payload)
             
             task_id = result.get('data', {}).get('task_id') if result and result.get('message') == 'SUCCESS' else None
-            update_robot_state(sn, point=home_point, task_id=task_id)
+            update_robot_state(sn, task_id=task_id)
 
         assigned_door_numbers = []
         for door in doors_to_assign:
@@ -269,7 +276,12 @@ def robot_dispatch():
         robot_state = RobotState.query.filter_by(sn=sn).first()
         if robot_state and robot_state.current_task_id and robot_state.last_point == target_point:
             app = current_app._get_current_object()
-            threading.Thread(target=_poll_notify_display_qr, args=(app, controller, sn, door_task_id, robot_state.current_task_id), daemon=True).start()
+            threading.Thread(
+                target=_poll_notify_display_qr, 
+                args=(app, controller, sn, door_task_id, robot_state.current_task_id), 
+                kwargs={'target_point': target_point}, 
+                daemon=True
+            ).start()
 
             return jsonify({
                 'status': 'success',
@@ -284,11 +296,16 @@ def robot_dispatch():
         task_id = None
         if dispatch_res and dispatch_res.get('message') == 'SUCCESS':
             task_id = dispatch_res.get('data', {}).get('task_id')
-            update_robot_state(sn, point=target_point, task_id=task_id)
+            update_robot_state(sn, task_id=task_id)
         
         if door_task_id:
             app = current_app._get_current_object()
-            threading.Thread(target=_poll_notify_display_qr, args=(app, controller, sn, door_task_id, task_id), daemon=True).start()
+            threading.Thread(
+                target=_poll_notify_display_qr, 
+                args=(app, controller, sn, door_task_id, task_id), 
+                kwargs={'target_point': target_point}, 
+                daemon=True
+            ).start()
 
         return jsonify({'status': 'success', 'message': f'Robot is moving to {target_point}', 'task_id': task_id, 'polling': door_task_id is not None})
     except Exception as e:
@@ -448,7 +465,14 @@ def return_packages_to_home():
         result = controller.custom_call2(payload=payload)
         
         task_id = result.get('data', {}).get('task_id') if result and result.get('message') == 'SUCCESS' else None
-        update_robot_state(sn, point=home_point, task_id=task_id)
+        update_robot_state(sn, task_id=task_id)
+
+        app = current_app._get_current_object()
+        threading.Thread(
+            target=_poll_and_update_location, 
+            args=(app, controller, sn, home_point), 
+            daemon=True
+        ).start()
 
         return jsonify({'status': 'success', 'message': f'Robot returning to {home_point}.', 'returning_home': True})
     except Exception as e:
@@ -661,10 +685,16 @@ def robot_recall():
         print(f"[系統] 硬體重置完畢，發送新導航指令回管理室 {home_point}...", flush=True)
         payload = build_custom_call_payload(sn=sn, point=home_point)
         res = controller.custom_call2(payload=payload)
-        
-        # 紀錄新的返航 task_id，並更新點位
+
         new_task = res.get('data', {}).get('task_id') if res and res.get('message') == 'SUCCESS' else None
-        update_robot_state(sn, point=home_point, task_id=new_task)
+        update_robot_state(sn, task_id=new_task)
+
+        app = current_app._get_current_object()
+        threading.Thread(
+            target=_poll_and_update_location, 
+            args=(app, controller, sn, home_point), 
+            daemon=True
+        ).start()
 
         # 處理本機資料庫的艙門保護
         recalled_doors = []
