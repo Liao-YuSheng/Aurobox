@@ -40,7 +40,16 @@ def ensure_default_doors(app: Flask) -> None:
                 door_task_id=None,
             )
         )
+        
+    extra_doors = Door.query.filter(
+        Door.sn == sn,
+        ~Door.door_number.in_(active_door_numbers)
+    ).all()
     
+    for extra_door in extra_doors:
+        db.session.delete(extra_door)
+        print(f"[系統] 已清理非目前模式下的殘留艙門: {extra_door.door_number}", flush=True)
+
     # 重置目前的邏輯門狀態
     doors = Door.query.filter_by(sn=sn).all()
     
