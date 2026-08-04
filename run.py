@@ -7,6 +7,9 @@ import argparse
 import logging
 from pathlib import Path
 
+from dotenv import load_dotenv
+load_dotenv()
+
 # 把 src 目錄加入系統路徑，這樣程式才能認得 aurobox 這個套件
 src_path = Path(__file__).parent / 'src'
 sys.path.insert(0, str(src_path))

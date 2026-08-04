@@ -17,6 +17,11 @@ def ensure_default_doors(app: Flask) -> None:
 
     # 讀取設定檔中的 DOOR_MODE
     mode = app.config.get('DOOR_MODE', '4_DOORS')
+
+    print("============== DEBUG ==============", flush=True)
+    print(f"實際讀取到的 DOOR_MODE 是: [{mode}]", flush=True)
+    print("===================================", flush=True)
+    
     if mode == '3_DOORS':
         active_door_numbers = ("H_01", "H_02", "H_03")
     else:
@@ -106,6 +111,8 @@ def create_app(config=None, reset_db=True):
     app.config['DEFAULT_MAP_NAME'] = app_config.get('DEFAULT_MAP_NAME')
     app.config['HOME_POINT_NAME'] = app_config.get('HOME_POINT_NAME')
     app.config['CHARGE_POINT_NAME'] = app_config.get('CHARGE_POINT_NAME')
+    app.config['DOOR_MODE'] = app_config.get('DOOR_MODE', '4_DOORS')
+    app.config['DOOR_MAPPING'] = app_config.get('DOOR_MAPPING', {})
     app.config['CENTRAL_API_BASE_URL'] = app_config.get('CENTRAL_API_BASE_URL')
 
     app.pudu_controller = FlashbotController(app_config)
