@@ -102,8 +102,11 @@ def assign_door_for_package(door_task_id):
     active_doors = _get_active_doors(current_app)
 
     # === 防呆：檢查機器人是否已經在外執行任務 ===
+    charge_point = current_app.config.get('CHARGE_POINT_NAME')
     robot_state = RobotState.query.filter_by(sn=sn).first()
-    if robot_state and robot_state.last_point and robot_state.last_point != home_point:
+    
+    # 如果機器人不在管理室，也不在充電站，代表它正在外面(例如住戶家)送貨，這時才擋下！
+    if robot_state and robot_state.last_point and (robot_state.last_point not in [home_point, charge_point]):
         return jsonify({
             'error': 'Robot is currently out for tasks. Please wait until it returns.', 
             'status': 'conflict'
